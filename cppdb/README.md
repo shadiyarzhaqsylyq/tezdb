@@ -1,4 +1,4 @@
-## Educational database in C.
+## Educational database in C++.
 
 
 
