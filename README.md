@@ -27,6 +27,8 @@ CREATE TABLE table (a INT PRIMARY KEY, b VARCHAR, c VARCHAR, d VARCHAR, f INT, g
 
 ### Examples for CREATE
 CREATE TABLE emp (id INT PRIMARY KEY, name VARCHAR, did VARCHAR, dep VARCHAR, salary INT, city VARCHAR);
+
+Multitable is not supported
 CREATE TABLE movies (id INT PRIMARY KEY, title VARCHAR, isbn VARCHAR, genre VARCHAR, price INT, author VARCHAR);
 
 
@@ -41,6 +43,8 @@ INSERT INTO emp VALUES (4, 'Diana', '2020B-2001b', 'Finance', 21000, 'LA');
 INSERT INTO emp VALUES (5, 'Evan', '3030C-3001a', 'HR', 3500, 'SF');
 INSERT INTO emp VALUES (6, 'Frank', '3030C-3001b', 'Sales', 11000, 'NY');
 
+
+Multitable is not supported
 INSERT INTO movies VALUES (1, 'The Godfather', '978-0743273565', 'Drama', 15, 'Francis Ford Coppola');
 INSERT INTO movies VALUES (2, 'Star Wars 4: A New Hope', '978-0061120084', 'Science Fiction', 18, 'George Lucas');
 INSERT INTO movies VALUES (3, 'The Godfather 2', '978-0451524935', 'Drama', 12, 'Francis Ford Coppola');
@@ -57,6 +61,7 @@ SELECT * FROM table WHERE a = '' AND b > '';
 SELECT * FROM table WHERE a = '' OR b = '';
 SELECT * FROM table WHERE (a = '' AND b = '') OR c < '';
 SELECT * FROM table WHERE a = '' AND (b = '' OR d = '');
+SELECT * FROM users WHERE ((id = 1 OR id = 2) AND age > 21) OR (role = 'superuser');
 
 
 ### Examples for SELECT
@@ -138,7 +143,11 @@ DELETE FROM table WHERE a = '' AND b = '';
 DELETE FROM table WHERE (a = '' AND b = '') OR c <= '';
 DELETE FROM table WHERE a > '' AND (b = '' OR c = '');
 
+SELECT COUNT(*) FROM table;
+SELECT COUNT(*) FROM table WHERE <expr>;
 
+
+Not supported
 DROP/ALTER TABLE
 DROP TABLE table;
 ALTER TABLE table DROP [Column] <col>;
@@ -166,14 +175,15 @@ SELECT * FROM table ORDER BY id DESC LIMIT 2;
 SELECT * FROM table ORDER BY id LIMIT 4 OFFSET 2; --skips first 2 rows returns 4 next rows
 SELECT * FROM table ORDER BY id DESC LIMIT 4 OFFSET 2;
 
-SELECT COUNT(*) FROM table;
-SELECT COUNT(*) FROM table WHERE <expr>;
+
+Not supported
 SELECT SUM(col) FROM table;
 SELECT AVG(col) FROM table;
 SELECT MIN(col) FROM table;
 SELECT MAX(col) FROM table;
 
 
+Not supported
 *JOIN*
 CREATE TABLE dept (id INT PRIMARY KEY, name VARCHAR(32));
 INSERT INTO dept VALUES (101, 'IT');
@@ -201,18 +211,9 @@ SELECT SUM(salary) FROM emp JOIN dept ON emp.dept_id = dept.id WHERE dept.name =
 SELECT * FROM emp JOIN dept ON emp.dept_id = dept.id WHERE salary > 80000;
 
 
-*Howto*
-CREATE TABLE <name> (<col> <type> [PRIMARY KEY], ...);
-DROP TABLE <name>;
-ALTER TABLE <name> ADD [COLUMN] <col> <type> [DEFAULT <value>];
-ALTER TABLE <name> DROP [COLUMN] <col>;
 
-INSERT INTO <name> VALUES (<v1>, <v2>, ...);
-SELECT * FROM <name> [WHERE <expr>] [ORDER BY <col> [ASC|DESC]] [LIMIT <n> [OFFSET <n>]];
-SELECT COUNT(*) FROM <name> [WHERE <expr>];
-UPDATE <name> SET <col> = <val> [, <col2> = <val2> ...] [WHERE <expr>];
-DELETE FROM <name> [WHERE <expr>];
-
+g++ -O2 -Wall -Wextra Pager.cpp Parser.cpp Engine.cpp main.cpp -o db_cpp
+./db_cpp test.db
 
 gcc -Wall -Wextra db.c -o db
 
