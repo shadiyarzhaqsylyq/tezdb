@@ -27,8 +27,6 @@ CREATE TABLE table (a INT PRIMARY KEY, b VARCHAR, c VARCHAR, d VARCHAR, f INT, g
 
 ### Examples for CREATE
 CREATE TABLE emp (id INT PRIMARY KEY, name VARCHAR, did VARCHAR, dep VARCHAR, salary INT, city VARCHAR);
-
-Multitable is not supported
 CREATE TABLE movies (id INT PRIMARY KEY, title VARCHAR, isbn VARCHAR, genre VARCHAR, price INT, author VARCHAR);
 
 
@@ -44,7 +42,6 @@ INSERT INTO emp VALUES (5, 'Evan', '3030C-3001a', 'HR', 3500, 'SF');
 INSERT INTO emp VALUES (6, 'Frank', '3030C-3001b', 'Sales', 11000, 'NY');
 
 
-Multitable is not supported in cdb.c
 INSERT INTO movies VALUES (1, 'The Godfather', '978-0743273565', 'Drama', 15, 'Francis Ford Coppola');
 INSERT INTO movies VALUES (2, 'Star Wars 4: A New Hope', '978-0061120084', 'Science Fiction', 18, 'George Lucas');
 INSERT INTO movies VALUES (3, 'The Godfather 2', '978-0451524935', 'Drama', 12, 'Francis Ford Coppola');
@@ -147,7 +144,7 @@ SELECT COUNT(*) FROM table;
 SELECT COUNT(*) FROM table WHERE <expr>;
 
 
-Not supported in cdb.c
+
 DROP/ALTER TABLE
 DROP TABLE table;
 ALTER TABLE table DROP [Column] <col>;
@@ -176,14 +173,14 @@ SELECT * FROM table ORDER BY id LIMIT 4 OFFSET 2; --skips first 2 rows returns 4
 SELECT * FROM table ORDER BY id DESC LIMIT 4 OFFSET 2;
 
 
-Not supported in cdb.c
+
 SELECT SUM(col) FROM table;
 SELECT AVG(col) FROM table;
 SELECT MIN(col) FROM table;
 SELECT MAX(col) FROM table;
 
 
-Not supported in cdb.c
+
 *JOIN*
 CREATE TABLE dept (id INT PRIMARY KEY, name VARCHAR(32));
 INSERT INTO dept VALUES (101, 'IT');
