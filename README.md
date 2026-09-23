@@ -53,6 +53,7 @@ INSERT INTO movies VALUES (6, 'Dune', '978-0441172719', 'Sci-Fi', 22, 'Denis Vil
 
 *SELECT*
 SELECT * FROM table;
+SELECT col1, col2 FROM emp;
 SELECT * FROM table WHERE a = '';
 SELECT * FROM table WHERE a = '' AND b > '';
 SELECT * FROM table WHERE a = '' OR b = '';
