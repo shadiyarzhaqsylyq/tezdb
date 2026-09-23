@@ -29,6 +29,17 @@ CREATE TABLE table (a INT PRIMARY KEY, b VARCHAR, c VARCHAR, d VARCHAR, f INT, g
 CREATE TABLE emp (id INT PRIMARY KEY, name VARCHAR, did VARCHAR, dep VARCHAR, salary INT, city VARCHAR);
 CREATE TABLE movies (id INT PRIMARY KEY, title VARCHAR, isbn VARCHAR, genre VARCHAR, price INT, author VARCHAR);
 
+only for ./db sql < init.sql
+CREATE TABLE movies (
+  id INT PRIMARY KEY,
+  title VARCHAR,
+  isbn VARCHAR,
+  genre VARCHAR,
+  price INT,
+  author VARCHAR
+);
+
+
 
 *INSERT*
 INSERT INTO table VALUES (PK num, 'char', 'char', 'char', int num, 'char');
