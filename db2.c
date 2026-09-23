@@ -329,6 +329,10 @@ void print_row(const DynamicRow* row, const Schema* schema) {
     printf(")\n");
 }
 
+
+
+
+
 // ============================================================================
 // WHERE-clause Structures & Evaluation (Tree with AND / OR / Parentheses)
 // ============================================================================
@@ -443,6 +447,12 @@ typedef struct Statement {
     char join_right_column[MAX_NAME_LEN]; // unqualified name, in the JOIN table
     WhereOp join_op;
 
+    // Select modifiers & projection
+    bool select_all;
+    char select_columns[MAX_COLUMNS][MAX_NAME_LEN];
+    uint32_t select_column_indices[MAX_COLUMNS];
+    uint32_t num_select_columns;
+
     // SELECT modifiers
     AggregateType agg_type;         // AGG_NONE for a plain SELECT *
     char agg_column[MAX_NAME_LEN];  // column for SUM/AVG/MIN/MAX; unused otherwise
@@ -488,7 +498,7 @@ typedef struct Statement {
 #define INTERNAL_NODE_KEY_SIZE sizeof(uint32_t)
 #define INTERNAL_NODE_CHILD_SIZE sizeof(uint32_t)
 #define INTERNAL_NODE_CELL_SIZE (INTERNAL_NODE_CHILD_SIZE + INTERNAL_NODE_KEY_SIZE)
-#define INTERNAL_NODE_MAX_KEYS 3
+
 
 #define LEAF_NODE_NUM_CELLS_SIZE sizeof(uint32_t)
 #define LEAF_NODE_NUM_CELLS_OFFSET (COMMON_NODE_HEADER_SIZE)
@@ -1028,15 +1038,306 @@ void cursor_advance(Cursor* cursor) {
     }
 }
 
+void update_parent_max_key(Table* table, uint32_t page_num, uint32_t old_max, uint32_t new_max) {
+    void* node = pager_get_page(table->pager, page_num);
+    if (is_node_root(node)) {
+        return; // Reached the root; nowhere else to propagate
+    }
+
+    uint32_t parent_page_num = *node_parent(node);
+    void* parent = pager_get_page(table->pager, parent_page_num);
+    uint32_t num_keys = *internal_node_num_keys(parent);
+
+    // Case 1: The child is one of the indexed left children (0 .. num_keys - 1)
+    for (uint32_t i = 0; i < num_keys; i++) {
+        if (*internal_node_child(parent, i) == page_num) {
+            *internal_node_key(parent, i) = new_max;
+            // Since this child is NOT the rightmost child, the parent's overall
+            // maximum key did not change. Propagation stops here.
+            return;
+        }
+    }
+
+    // Case 2: The child is the parent's right_child
+    if (*internal_node_right_child(parent) == page_num) {
+        // The parent doesn't store an explicit key for its right_child.
+        // However, because this child is the right_child, the parent node's own
+        // maximum key changed from old_max to new_max. Propagate upward!
+        update_parent_max_key(table, parent_page_num, old_max, new_max);
+    }
+}
+
+// NEW
+static inline uint32_t leaf_node_min_cells(uint32_t row_size) {
+    return leaf_node_max_cells(row_size) / 2;
+}
+
+
+
+void check_and_collapse_root(Table* table) {
+    void* root = pager_get_page(table->pager, table->root_page_num);
+    if (get_node_type(root) != NODE_INTERNAL) return;
+
+    // If internal root has 0 keys, it only points to right_child
+    if (*internal_node_num_keys(root) == 0) {
+        uint32_t only_child_page = *internal_node_right_child(root);
+        void* only_child = pager_get_page(table->pager, only_child_page);
+
+        // Overwrite root with child's contents to keep table->root_page_num stable
+        memcpy(root, only_child, PAGE_SIZE);
+        set_node_root(root, true);
+
+        // If the promoted child was internal, re-parent its grandchildren to root
+        if (get_node_type(root) == NODE_INTERNAL) {
+            uint32_t num_keys = *internal_node_num_keys(root);
+            for (uint32_t i = 0; i < num_keys; i++) {
+                void* gc = pager_get_page(table->pager, *internal_node_child(root, i));
+                *node_parent(gc) = table->root_page_num;
+            }
+            void* rgc = pager_get_page(table->pager, *internal_node_right_child(root));
+            *node_parent(rgc) = table->root_page_num;
+        }
+
+        // Reclaim the child page
+        free_page(table->db, only_child_page);
+        persist_free_list(table->db);
+    }
+}
+
+
+
+
+void internal_node_remove_child(Table* table, uint32_t parent_page_num, uint32_t child_page_num) {
+    void* parent = pager_get_page(table->pager, parent_page_num);
+    uint32_t num_keys = *internal_node_num_keys(parent);
+
+    // Case 1: The removed child is the right_child
+    if (*internal_node_right_child(parent) == child_page_num) {
+        if (num_keys == 0) {
+            *internal_node_right_child(parent) = INVALID_PAGE_NUM;
+            return;
+        }
+        // The rightmost indexed child becomes the new right_child
+        *internal_node_right_child(parent) = *internal_node_child(parent, num_keys - 1);
+        (*internal_node_num_keys(parent))--;
+        return;
+    }
+
+    // Case 2: The child is in child[0 .. num_keys - 1]
+    int idx = -1;
+    for (uint32_t i = 0; i < num_keys; i++) {
+        if (*internal_node_child(parent, i) == child_page_num) {
+            idx = (int)i;
+            break;
+        }
+    }
+    if (idx == -1) return;
+
+    // Shift subsequent cells left
+    for (uint32_t i = (uint32_t)idx; i < num_keys - 1; i++) {
+        void* dest = internal_node_cell(parent, i);
+        void* src = internal_node_cell(parent, i + 1);
+        memcpy(dest, src, INTERNAL_NODE_CELL_SIZE);
+    }
+    (*internal_node_num_keys(parent))--;
+}
+
+void handle_leaf_underflow(Table* table, uint32_t leaf_page_num) {
+    void* leaf = pager_get_page(table->pager, leaf_page_num);
+    if (is_node_root(leaf)) return; // Root is allowed to have < min cells
+
+    uint32_t row_size = table->schema.row_size;
+    uint32_t min_cells = leaf_node_min_cells(row_size);
+    if (*leaf_node_num_cells(leaf) >= min_cells) return;
+
+    uint32_t parent_page = *node_parent(leaf);
+    void* parent = pager_get_page(table->pager, parent_page);
+    uint32_t num_keys = *internal_node_num_keys(parent);
+
+    // Find our index within the parent
+    int my_index = -1;
+    bool is_right_child = (*internal_node_right_child(parent) == leaf_page_num);
+    if (!is_right_child) {
+        for (uint32_t i = 0; i < num_keys; i++) {
+            if (*internal_node_child(parent, i) == leaf_page_num) {
+                my_index = (int)i;
+                break;
+            }
+        }
+        if (my_index == -1) return; // Structural safety check
+    }
+
+    uint32_t cell_sz = leaf_node_cell_size(row_size);
+    uint32_t max_cells = leaf_node_max_cells(row_size);
+
+    // Identify sibling pages within the same parent
+    uint32_t left_sibling_page = INVALID_PAGE_NUM;
+    if (is_right_child) {
+        if (num_keys > 0) {
+            left_sibling_page = *internal_node_child(parent, num_keys - 1);
+        }
+    } else if (my_index > 0) {
+        left_sibling_page = *internal_node_child(parent, (uint32_t)my_index - 1);
+    }
+
+    uint32_t right_sibling_page = INVALID_PAGE_NUM;
+    if (!is_right_child) {
+        if ((uint32_t)my_index + 1 < num_keys) {
+            right_sibling_page = *internal_node_child(parent, (uint32_t)my_index + 1);
+        } else {
+            right_sibling_page = *internal_node_right_child(parent);
+        }
+    }
+
+    // =========================================================================
+    // STEP 1: PREFER BORROWING (Try Left, then Fall Through to Right)
+    // =========================================================================
+
+    // 1A. Try borrow from Left Sibling
+    if (left_sibling_page != INVALID_PAGE_NUM) {
+        void* left_sib = pager_get_page(table->pager, left_sibling_page);
+        uint32_t left_cells = *leaf_node_num_cells(left_sib);
+
+        if (left_cells > min_cells) {
+            uint32_t leaf_cells = *leaf_node_num_cells(leaf);
+            // Shift leaf cells right by 1
+            for (uint32_t i = leaf_cells; i > 0; i--) {
+                memcpy(leaf_node_cell(leaf, i, row_size),
+                       leaf_node_cell(leaf, i - 1, row_size), cell_sz);
+            }
+            // Copy last cell of left sibling to index 0 of leaf
+            memcpy(leaf_node_cell(leaf, 0, row_size),
+                   leaf_node_cell(left_sib, left_cells - 1, row_size), cell_sz);
+
+            (*leaf_node_num_cells(leaf))++;
+            (*leaf_node_num_cells(left_sib))--;
+
+            uint32_t new_left_max = *leaf_node_key(left_sib, *leaf_node_num_cells(left_sib) - 1, row_size);
+            update_parent_max_key(table, left_sibling_page, 0, new_left_max);
+            return;
+        }
+    }
+
+    // 1B. Try borrow from Right Sibling (Falls through here if left couldn't lend)
+    if (right_sibling_page != INVALID_PAGE_NUM) {
+        void* right_sib = pager_get_page(table->pager, right_sibling_page);
+        uint32_t right_cells = *leaf_node_num_cells(right_sib);
+
+        if (right_cells > min_cells) {
+            uint32_t leaf_cells = *leaf_node_num_cells(leaf);
+            // Copy index 0 from right sibling to end of leaf
+            memcpy(leaf_node_cell(leaf, leaf_cells, row_size),
+                   leaf_node_cell(right_sib, 0, row_size), cell_sz);
+
+            // Shift right sibling cells left by 1
+            for (uint32_t i = 0; i < right_cells - 1; i++) {
+                memcpy(leaf_node_cell(right_sib, i, row_size),
+                       leaf_node_cell(right_sib, i + 1, row_size), cell_sz);
+            }
+            (*leaf_node_num_cells(leaf))++;
+            (*leaf_node_num_cells(right_sib))--;
+
+            uint32_t new_leaf_max = *leaf_node_key(leaf, *leaf_node_num_cells(leaf) - 1, row_size);
+            update_parent_max_key(table, leaf_page_num, 0, new_leaf_max);
+            return;
+        }
+    }
+
+    // =========================================================================
+    // STEP 2: MERGING (Only reached if NEITHER sibling had spare cells to lend)
+    // =========================================================================
+
+    // 2A. Merge Leaf into Left Sibling
+    if (left_sibling_page != INVALID_PAGE_NUM) {
+        void* left_sib = pager_get_page(table->pager, left_sibling_page);
+        uint32_t left_cells = *leaf_node_num_cells(left_sib);
+        uint32_t leaf_cells = *leaf_node_num_cells(leaf);
+
+        if (left_cells + leaf_cells <= max_cells) {
+            for (uint32_t i = 0; i < leaf_cells; i++) {
+                memcpy(leaf_node_cell(left_sib, left_cells + i, row_size),
+                       leaf_node_cell(leaf, i, row_size), cell_sz);
+            }
+            *leaf_node_num_cells(left_sib) = left_cells + leaf_cells;
+            *leaf_node_next_leaf(left_sib) = *leaf_node_next_leaf(leaf);
+
+            // Unlink and reclaim leaf page
+            internal_node_remove_child(table, parent_page, leaf_page_num);
+            free_page(table->db, leaf_page_num);
+            persist_free_list(table->db);
+
+            // Update parent max key AFTER child removal so parent state is stable
+            if (*leaf_node_num_cells(left_sib) > 0) {
+                uint32_t new_max = *leaf_node_key(left_sib, *leaf_node_num_cells(left_sib) - 1, row_size);
+                update_parent_max_key(table, left_sibling_page, 0, new_max);
+            }
+
+            check_and_collapse_root(table);
+            return;
+        }
+    }
+
+    // 2B. Merge Right Sibling into Leaf
+    if (right_sibling_page != INVALID_PAGE_NUM) {
+        void* right_sib = pager_get_page(table->pager, right_sibling_page);
+        uint32_t leaf_cells = *leaf_node_num_cells(leaf);
+        uint32_t right_cells = *leaf_node_num_cells(right_sib);
+
+        if (leaf_cells + right_cells <= max_cells) {
+            for (uint32_t i = 0; i < right_cells; i++) {
+                memcpy(leaf_node_cell(leaf, leaf_cells + i, row_size),
+                       leaf_node_cell(right_sib, i, row_size), cell_sz);
+            }
+            *leaf_node_num_cells(leaf) = leaf_cells + right_cells;
+            *leaf_node_next_leaf(leaf) = *leaf_node_next_leaf(right_sib);
+
+            // Unlink and reclaim right sibling page
+            internal_node_remove_child(table, parent_page, right_sibling_page);
+            free_page(table->db, right_sibling_page);
+            persist_free_list(table->db);
+
+            // Update parent max key AFTER removal so if leaf was promoted to right_child,
+            // the new max key correctly bubbles all the way up to the ancestors
+            if (*leaf_node_num_cells(leaf) > 0) {
+                uint32_t new_max = *leaf_node_key(leaf, *leaf_node_num_cells(leaf) - 1, row_size);
+                update_parent_max_key(table, leaf_page_num, 0, new_max);
+            }
+
+            check_and_collapse_root(table);
+            return;
+        }
+    }
+}
+
+
+
+
+
 void leaf_node_delete(Cursor* cursor) {
-    void* node = pager_get_page(cursor->table->pager, cursor->page_num);
+    Table* table = cursor->table;
+    void* node = pager_get_page(table->pager, cursor->page_num);
     uint32_t num_cells = *leaf_node_num_cells(node);
-    uint32_t cell_sz = leaf_node_cell_size(cursor->table->schema.row_size);
-    for (uint32_t i = cursor->cell_num; i < num_cells - 1; i++) {
-        memcpy(leaf_node_cell(node, i, cursor->table->schema.row_size),
-               leaf_node_cell(node, i + 1, cursor->table->schema.row_size), cell_sz);
+    uint32_t row_size = table->schema.row_size;
+
+    if(num_cells == 0 ||cursor->cell_num >= num_cells) return;
+
+    uint32_t old_max = *leaf_node_key(node, num_cells - 1, row_size);
+    bool deleting_max = (cursor->cell_num == num_cells - 1);
+
+    uint32_t cell_sz = leaf_node_cell_size(row_size);
+    for(uint32_t i = cursor->cell_num; i < num_cells - 1; i++){
+        memcpy(leaf_node_cell(node,i,row_size),
+            leaf_node_cell(node, i+1, row_size),
+            cell_sz);
+
     }
     *(leaf_node_num_cells(node)) -= 1;
+    if(deleting_max && *leaf_node_num_cells(node) > 0){
+        uint32_t new_max = *leaf_node_key(node, *leaf_node_num_cells(node) - 1, row_size);
+        update_parent_max_key(table, cursor->page_num, old_max, new_max);
+
+    }
+    handle_leaf_underflow(table, cursor->page_num);
 }
 
 uint32_t get_unused_page_num(Table* table) {
@@ -1085,6 +1386,12 @@ void update_internal_node_key(void* node, uint32_t old_key, uint32_t new_key) {
 
 void internal_node_split_and_insert(Table* table, uint32_t parent_page_num, uint32_t child_page_num);
 
+
+static inline uint32_t internal_node_max_keys(void) {
+    return (PAGE_SIZE - INTERNAL_NODE_HEADER_SIZE) / INTERNAL_NODE_CELL_SIZE;
+}
+
+
 void internal_node_insert(Table* table, uint32_t parent_page_num, uint32_t child_page_num) {
     void* parent = pager_get_page(table->pager, parent_page_num);
     void* child = pager_get_page(table->pager, child_page_num);
@@ -1092,7 +1399,7 @@ void internal_node_insert(Table* table, uint32_t parent_page_num, uint32_t child
     uint32_t index = internal_node_find_child(parent, child_max_key);
 
     uint32_t original_num_keys = *internal_node_num_keys(parent);
-    if (original_num_keys >= INTERNAL_NODE_MAX_KEYS) {
+    if (original_num_keys >= internal_node_max_keys()) {
         internal_node_split_and_insert(table, parent_page_num, child_page_num);
         return;
     }
@@ -1154,7 +1461,10 @@ void internal_node_split_and_insert(Table* table, uint32_t parent_page_num, uint
     *node_parent(cur) = new_page_num;
     *internal_node_right_child(old_node) = INVALID_PAGE_NUM;
 
-    for (int i = INTERNAL_NODE_MAX_KEYS - 1; i > (int)(INTERNAL_NODE_MAX_KEYS / 2); i--) {
+    uint32_t max_keys = internal_node_max_keys();
+    uint32_t split_index = max_keys /2; // e.g. 510 / 2 =255
+
+    for (int i = (int)max_keys - 1; i > (int)split_index; i--) {
         cur_page_num = *internal_node_child(old_node, i);
         cur = pager_get_page(table->pager, cur_page_num);
         internal_node_insert(table, new_page_num, cur_page_num);
@@ -1365,9 +1675,15 @@ void tokenize_input(const char* input, TokenList* list) {
             continue;
         }
 
-        if (isdigit((unsigned char)input[pos])) {
+        if (isdigit((unsigned char)input[pos]) ||
+            (input[pos] == '-' && pos+1 < len && isdigit((unsigned char)input[pos+1]))) {
             char num[MAX_STR_LEN] = {0};
             size_t num_pos = 0;
+
+            if(input[pos] == '-'){
+                num[num_pos++] = input[pos++];
+            }
+
             while (pos < len && isdigit((unsigned char)input[pos]) && num_pos < MAX_STR_LEN - 1) {
                 num[num_pos++] = input[pos++];
             }
@@ -1375,6 +1691,15 @@ void tokenize_input(const char* input, TokenList* list) {
             list->tokens[list->count].kind = TOKEN_NUMBER;
             strcpy(list->tokens[list->count].text, num);
             list->count++;
+            continue;
+        }
+
+        if(strchr("=<>(),*-", input[pos]) != NULL){
+            list->tokens[list->count].kind = TOKEN_SYMBOL;
+            list->tokens[list->count].text[0] = input[pos];
+            list->tokens[list->count].text[1] = '\0';
+            list->count++;
+            pos++;
             continue;
         }
 
@@ -1815,6 +2140,31 @@ PrepareResult prepare_statement(TokenList* list, const Database* db, Statement* 
             strncpy(statement->agg_column, col_tok.text, MAX_NAME_LEN - 1);
         } else if (strcmp(sel.text, "*") == 0) {
             advance_token(list);
+            statement->select_all = true;
+        } else {
+            // Parse comma-separated column list: col1, col2
+            statement->select_all = false;
+            while(list->cursor < list->count && strcasecmp_custom(peek_token(list).text, "from") != 0){
+                Token col = advance_token(list);
+                if(col.kind != TOKEN_IDENTIFIER) return PREPARE_SYNTAX_ERROR;
+
+                if(statement->num_select_columns >=MAX_COLUMNS) return PREPARE_SYNTAX_ERROR;
+
+                strncpy(statement->select_columns[statement->num_select_columns++], col.text, MAX_NAME_LEN - 1);
+
+                if(strcasecmp_custom(peek_token(list).text, "from") == 0) break;
+
+                if(!match_token(list, ",")) return PREPARE_SYNTAX_ERROR;
+
+
+
+
+
+
+
+            }
+            if(statement->num_select_columns == 0) return PREPARE_SYNTAX_ERROR;
+
         }
 
         if (!match_token(list, "from")) return PREPARE_SYNTAX_ERROR;
@@ -1881,6 +2231,18 @@ PrepareResult prepare_statement(TokenList* list, const Database* db, Statement* 
             build_combined_schema(&combined_schema, &left_entry->schema, &right_entry->schema);
             effective_schema = &combined_schema;
         }
+
+        // Validate projected columns against effective_schema
+                if (!statement->select_all && statement->agg_type == AGG_NONE) {
+                    for (uint32_t i = 0; i < statement->num_select_columns; i++) {
+                        int col_idx = schema_find_column(effective_schema, statement->select_columns[i]);
+                        if (col_idx < 0) {
+                            printf("Error: column '%s' not found.\n", statement->select_columns[i]);
+                            return PREPARE_SYNTAX_ERROR;
+                        }
+                        statement->select_column_indices[i] = (uint32_t)col_idx;
+                    }
+                }
 
         if (statement->agg_type == AGG_SUM || statement->agg_type == AGG_AVG ||
             statement->agg_type == AGG_MIN || statement->agg_type == AGG_MAX) {
@@ -2174,6 +2536,25 @@ static void print_aggregate(const Statement* statement, const DynamicRow* rows, 
     }
 }
 
+void print_projected_row(const DynamicRow* row, const Schema* schema, const Statement* statement) {
+    if (statement->select_all) {
+        print_row(row, schema);
+        return;
+    }
+
+    printf("(");
+    for (uint32_t i = 0; i < statement->num_select_columns; ++i) {
+        if (i > 0) printf(", ");
+        uint32_t col_idx = statement->select_column_indices[i];
+        if (schema->columns[col_idx].type == DATA_TYPE_INT) {
+            printf("%d", row->values[col_idx].int_val);
+        } else {
+            printf("'%s'", row->values[col_idx].str_val);
+        }
+    }
+    printf(")\n");
+}
+
 // Shared tail end of SELECT execution: aggregate reduction, or ORDER BY +
 // LIMIT/OFFSET + printing. Used by both a plain SELECT and a JOINed one --
 // `schema` describes whatever `rows` actually contains (a single table's
@@ -2197,7 +2578,7 @@ static ExecuteResult finish_select(Statement* statement, DynamicRow* rows, uint3
     uint32_t end = (end64 > count) ? count : (uint32_t)end64;
 
     for (uint32_t i = start; i < end; i++) {
-        print_row(&rows[i], schema);
+        print_projected_row(&rows[i], schema, statement);
     }
     return EXECUTE_SUCCESS;
 }
@@ -2385,6 +2766,23 @@ ExecuteResult execute_rollback(Database* db) {
     }
     db->pager->num_pages = db->tx_original_num_pages;
     db->in_transaction = false;
+
+
+    // Truncate physical file on disk if it expanded during transaction
+    off_t target_size = (off_t)db->tx_original_num_pages * PAGE_SIZE;
+
+    struct stat st;
+    if(fstat(db->pager->file_descriptor, &st) == -1){
+        printf("Warning: failed to stat file during rollback (errno %d).\n", errno);
+
+    } else if (st.st_size > target_size){
+        if(ftruncate(db->pager->file_descriptor, target_size) == -1){
+            printf("Warning: failed to truncate file during rollback (errno %d).\n", errno);
+        } else { db->pager->file_length = (uint32_t)target_size; }
+
+    } else {
+        db->pager->file_length = (uint32_t)st.st_size;
+    }
 
     // Catalog & free-list pages are ordinary pages, so the loop above
     // already restored their on-disk/cached bytes -- but db->tables[] and
