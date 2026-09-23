@@ -3,8 +3,7 @@
 
 
 
-
-1 file 1 table
+Multitable
 
 
 Flexible Primary Key - user_id INT PRIMARY KEY or product_code INT PRIMARY KEY
