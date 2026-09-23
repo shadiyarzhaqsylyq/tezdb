@@ -2,23 +2,42 @@ CC      = gcc
 CFLAGS  = -Wall -Wextra -Iinclude -g -O0
 LDFLAGS =
 
-SRCS = src/schema.c src/pager.c src/btree.c src/database.c src/parser.c src/executor.c src/main.c
-OBJS = $(SRCS:.c=.o)
+OBJS = \
+	main/schema.o \
+	main/pager.o \
+	main/btree.o \
+	main/database.o \
+	main/parser.o \
+	main/executor.o \
+	main/main.o
 
-TARGET = db
+.PHONY: all clean
 
-.PHONY: all clean run
+all: db
 
-all: $(TARGET)
+db: $(OBJS)
+	$(CC) $(CFLAGS) -o db $(OBJS) $(LDFLAGS)
 
-$(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+src/schema.o: src/schema.c include/schema.h include/common.h
+	$(CC) $(CFLAGS) -c -o main/schema.o main/schema.c
 
-src/%.o: src/%.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+src/pager.o: src/pager.c include/pager.h include/common.h
+	$(CC) $(CFLAGS) -c -o main/pager.o main/pager.c
+
+src/btree.o: src/btree.c include/btree.h include/database.h include/common.h
+	$(CC) $(CFLAGS) -c -o main/btree.o main/btree.c
+
+src/database.o: src/database.c include/database.h include/common.h
+	$(CC) $(CFLAGS) -c -o main/database.o main/database.c
+
+src/parser.o: src/parser.c include/parser.h include/common.h
+	$(CC) $(CFLAGS) -c -o main/parser.o main/parser.c
+
+src/executor.o: src/executor.c include/executor.h include/common.h
+	$(CC) $(CFLAGS) -c -o main/executor.o main/executor.c
+
+src/main.o: src/main.c include/common.h
+	$(CC) $(CFLAGS) -c -o main/main.o main/main.c
 
 clean:
-	rm -f $(OBJS) $(TARGET)
-
-run: $(TARGET)
-	./$(TARGET) test.db
+	rm -f $(OBJS) db
