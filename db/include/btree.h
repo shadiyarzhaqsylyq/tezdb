@@ -177,4 +177,15 @@ void print_tree(Table* table, uint32_t page_num, uint32_t indentation_level);
 // Needed by database module for page allocation during splits
 uint32_t get_unused_page_num(Table* table);
 
+
+void cursor_normalize(Cursor* cursor);
+
+
+
+static inline uint32_t internal_node_min_keys(void) {
+    return internal_node_max_keys() / 2;
+}
+
+void handle_internal_underflow(Table* table, uint32_t node_page_num);
+
 #endif /* DB_BTREE_H */
