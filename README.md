@@ -21,6 +21,8 @@ VARCHAR, CHAR - default 32
 Operators - >=, <=, =, <, >, !=, <>
 
 != and <> have the same meaning "not equal to".
+
+Column projection, Batch Execution / File Loading
 ```
 *CREATE*
 CREATE TABLE table (a INT PRIMARY KEY, b VARCHAR, c VARCHAR, d VARCHAR, f INT, g VARCHAR);
