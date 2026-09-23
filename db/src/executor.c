@@ -1,5 +1,102 @@
 #include "executor.h"
 
+
+
+typedef struct PkRange {
+    bool is_constrained;     // True if we can narrow the scan
+    bool has_point_lookup;   // True if we found: pk = <val>
+    uint32_t point_key;      // The exact key to find
+    uint32_t min_key;        // Start scan here (default 0)
+    uint32_t max_key;        // Stop scan when key > max_key (default UINT32_MAX)
+    bool is_impossible;      // e.g. id > 10 AND id < 5 (no rows can match)
+} PkRange;
+
+static void analyze_pk_expr(const Expr* expr, const char* pk_col_name, PkRange* range) {
+    if (!expr || range->is_impossible) return;
+
+    if (expr->type == EXPR_LOGICAL) {
+        // If OR is present, safe bounding is complex; fall back to full table scan
+        if (expr->log_op == LOGICAL_OR) {
+            range->is_constrained = false;
+            range->has_point_lookup = false;
+            return;
+        }
+        // For AND, recursively intersect bounds
+        analyze_pk_expr(expr->left, pk_col_name, range);
+        analyze_pk_expr(expr->right, pk_col_name, range);
+        return;
+    }
+
+    // Leaf comparison node: check if it targets the primary key column
+    if (strcasecmp_custom(expr->column, pk_col_name) != 0) return;
+    if (expr->value.is_string) return; // PK is INT
+
+    uint32_t val = expr->value.int_value;
+    range->is_constrained = true;
+
+    switch (expr->op) {
+        case WHERE_OP_EQ:
+            if (range->has_point_lookup && range->point_key != val) {
+                range->is_impossible = true; // id = 3 AND id = 5
+            }
+            range->has_point_lookup = true;
+            range->point_key = val;
+            if (val < range->min_key || val > range->max_key) {
+                range->is_impossible = true;
+            }
+            range->min_key = val;
+            range->max_key = val;
+            break;
+
+        case WHERE_OP_GE:
+            if (val > range->min_key) range->min_key = val;
+            break;
+
+        case WHERE_OP_GT:
+            if (val == UINT32_MAX) range->is_impossible = true;
+            else if (val + 1 > range->min_key) range->min_key = val + 1;
+            break;
+
+        case WHERE_OP_LE:
+            if (val < range->max_key) range->max_key = val;
+            break;
+
+        case WHERE_OP_LT:
+            if (val == 0) range->is_impossible = true;
+            else if (val - 1 < range->max_key) range->max_key = val - 1;
+            break;
+
+        case WHERE_OP_NEQ:
+            // Handled by row_matches_where
+            break;
+    }
+
+    if (range->min_key > range->max_key) {
+        range->is_impossible = true;
+    }
+}
+
+static PkRange get_pk_scan_range(const Statement* statement, const Schema* schema) {
+    PkRange range = {
+        .is_constrained = false,
+        .has_point_lookup = false,
+        .point_key = 0,
+        .min_key = 0,
+        .max_key = UINT32_MAX,
+        .is_impossible = false
+    };
+
+    if (!statement->where) return range;
+
+    const char* pk_col = schema->columns[schema->primary_key_index].name;
+    analyze_pk_expr(statement->where, pk_col, &range);
+    return range;
+}
+
+
+
+
+
 bool row_matches_where(const DynamicRow* row, const Statement* statement, const Schema* schema) {
     if (!statement->where) return true;
     return evaluate_expr(statement->where, row, schema);
@@ -130,24 +227,53 @@ ExecuteResult execute_update(Statement* statement, Table* table) {
     return EXECUTE_SUCCESS;
 }
 
+// executor.c
+
 ExecuteResult execute_delete(Statement* statement, Table* table) {
     static uint32_t keys_to_delete[PAGE_SIZE];
     uint32_t delete_count = 0;
-
-    Cursor* cursor = table_start(table);
     DynamicRow row;
 
-    while (!cursor->end_of_table) {
-        deserialize_row(cursor_value(cursor), &row, &table->schema);
-        if (row_matches_where(&row, statement, &table->schema)) {
-            if (delete_count < PAGE_SIZE) {
-                keys_to_delete[delete_count++] = get_pk_value(&row, &table->schema);
-            }
-        }
-        cursor_advance(cursor);
-    }
-    free(cursor);
+    PkRange range = get_pk_scan_range(statement, &table->schema);
 
+    if (!range.is_impossible) {
+        if (range.has_point_lookup) {
+            Cursor* cursor = table_find(table, range.point_key);
+            cursor_normalize(cursor);
+            if (!cursor->end_of_table) {
+                void* node = pager_get_page(table->pager, cursor->page_num);
+                uint32_t num_cells = *leaf_node_num_cells(node);
+                if (cursor->cell_num < num_cells &&
+                    *leaf_node_key(node, cursor->cell_num, table->schema.row_size) == range.point_key) {
+                    deserialize_row(cursor_value(cursor), &row, &table->schema);
+                    if (row_matches_where(&row, statement, &table->schema)) {
+                        keys_to_delete[delete_count++] = range.point_key;
+                    }
+                }
+            }
+            free(cursor);
+        } else {
+            Cursor* cursor = range.is_constrained ? table_find(table, range.min_key)
+                                                  : table_start(table);
+            cursor_normalize(cursor);
+            while (!cursor->end_of_table) {
+                void* node = pager_get_page(table->pager, cursor->page_num);
+                uint32_t cur_key = *leaf_node_key(node, cursor->cell_num, table->schema.row_size);
+                if (range.is_constrained && cur_key > range.max_key) break;
+
+                deserialize_row(cursor_value(cursor), &row, &table->schema);
+                if (row_matches_where(&row, statement, &table->schema)) {
+                    if (delete_count < PAGE_SIZE) {
+                        keys_to_delete[delete_count++] = cur_key;
+                    }
+                }
+                cursor_advance(cursor);
+            }
+            free(cursor);
+        }
+    }
+
+    // Perform deletions
     for (uint32_t i = 0; i < delete_count; i++) {
         uint32_t key = keys_to_delete[i];
         Cursor* c = table_find(table, key);
@@ -159,6 +285,7 @@ ExecuteResult execute_delete(Statement* statement, Table* table) {
         }
         free(c);
     }
+
     printf("DELETE %u\n", delete_count);
     return EXECUTE_SUCCESS;
 }
@@ -272,26 +399,74 @@ static ExecuteResult finish_select(Statement* statement, DynamicRow* rows,
     return EXECUTE_SUCCESS;
 }
 
-ExecuteResult execute_select(Statement* statement, Table* table) {
-    Cursor* cursor = table_start(table);
-    DynamicRow row;
 
+
+ExecuteResult execute_select(Statement* statement, Table* table) {
     uint32_t capacity = 64;
     uint32_t count = 0;
     DynamicRow* rows = (DynamicRow*)malloc(capacity * sizeof(DynamicRow));
+    DynamicRow row;
 
-    while (!cursor->end_of_table) {
-        deserialize_row(cursor_value(cursor), &row, &table->schema);
-        if (row_matches_where(&row, statement, &table->schema)) {
-            if (count == capacity) {
-                capacity *= 2;
-                rows = (DynamicRow*)realloc(rows, capacity * sizeof(DynamicRow));
-            }
-            rows[count++] = row;
-        }
-        cursor_advance(cursor);
+    PkRange range = get_pk_scan_range(statement, &table->schema);
+
+    // Short-circuit: condition can never match any row (e.g., id > 10 AND id < 5)
+    if (range.is_impossible) {
+        ExecuteResult res = finish_select(statement, rows, 0, &table->schema);
+        free(rows);
+        return res;
     }
-    free(cursor);
+
+    // PATH 1: Exact Point Lookup (WHERE id = X) -> O(log N)
+    if (range.has_point_lookup) {
+        Cursor* cursor = table_find(table, range.point_key);
+        cursor_normalize(cursor);
+
+        if (!cursor->end_of_table) {
+            void* node = pager_get_page(table->pager, cursor->page_num);
+            uint32_t num_cells = *leaf_node_num_cells(node);
+
+            if (cursor->cell_num < num_cells) {
+                uint32_t key = *leaf_node_key(node, cursor->cell_num, table->schema.row_size);
+                if (key == range.point_key) {
+                    deserialize_row(cursor_value(cursor), &row, &table->schema);
+                    // Verify any secondary non-PK conditions (e.g. id = 5 AND name = 'Alice')
+                    if (row_matches_where(&row, statement, &table->schema)) {
+                        rows[count++] = row;
+                    }
+                }
+            }
+        }
+        free(cursor);
+    }
+    // PATH 2: Range Scan or Full Scan -> O(log N + M)
+    else {
+        // Jump directly to min_key instead of scanning from page 0!
+        Cursor* cursor = range.is_constrained ? table_find(table, range.min_key)
+                                              : table_start(table);
+        cursor_normalize(cursor);
+
+        while (!cursor->end_of_table) {
+            void* node = pager_get_page(table->pager, cursor->page_num);
+            uint32_t cur_key = *leaf_node_key(node, cursor->cell_num, table->schema.row_size);
+
+            // B+Tree leaf keys are sorted: stop scanning once past max_key
+            if (range.is_constrained && cur_key > range.max_key) {
+                break;
+            }
+
+            deserialize_row(cursor_value(cursor), &row, &table->schema);
+            if (row_matches_where(&row, statement, &table->schema)) {
+                if (count == capacity) {
+                    capacity *= 2;
+                    rows = (DynamicRow*)realloc(rows, capacity * sizeof(DynamicRow));
+                }
+                rows[count++] = row;
+            }
+
+            cursor_advance(cursor);
+        }
+        free(cursor);
+    }
 
     ExecuteResult result = finish_select(statement, rows, count, &table->schema);
     free(rows);
