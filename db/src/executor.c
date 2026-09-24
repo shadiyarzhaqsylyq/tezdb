@@ -1,5 +1,8 @@
 #include "executor.h"
 
+/* Near the top of src/executor.c */
+//static bool fk_parent_exists(Database* db, const char* parent_table_name, uint32_t parent_pk_val);
+//static bool fk_child_reference_exists(Database* db, const char* parent_table_name, uint32_t parent_pk_val);
 
 
 typedef struct PkRange {
@@ -94,7 +97,72 @@ static PkRange get_pk_scan_range(const Statement* statement, const Schema* schem
 }
 
 
+static bool fk_parent_exists(Database* db, const char* parent_table_name, uint32_t parent_pk_val) {
+    const TableCatalogEntry* parent_entry = database_find_table(db, parent_table_name);
+    if (!parent_entry) return false;
 
+    Table parent_table = {
+        .pager = db->pager,
+        .root_page_num = parent_entry->root_page_num,
+        .schema = parent_entry->schema,
+        .db = db
+    };
+
+    Cursor* cursor = table_find(&parent_table, parent_pk_val);
+    cursor_normalize(cursor);
+    bool exists = false;
+    
+    if (!cursor->end_of_table) {
+        void* node = pager_get_page(parent_table.pager, cursor->page_num);
+        uint32_t num_cells = *leaf_node_num_cells(node);
+        if (cursor->cell_num < num_cells) {
+            uint32_t key = *leaf_node_key(node, cursor->cell_num, parent_table.schema.row_size);
+            if (key == parent_pk_val) {
+                exists = true;
+            }
+        }
+    }
+    free(cursor);
+    return exists;
+}
+
+
+static bool fk_child_reference_exists(Database* db, const char* parent_table_name, uint32_t parent_pk_val) {
+    for (uint32_t i = 0; i < MAX_TABLES; i++) {
+        if (!db->tables[i].in_use) continue;
+        const Schema* child_schema = &db->tables[i].schema;
+
+        for (uint32_t f = 0; f < child_schema->num_foreign_keys; f++) {
+            const ForeignKey* fk = &child_schema->foreign_keys[f];
+            if (!fk->in_use) continue;
+            if (strcasecmp_custom(fk->ref_table, parent_table_name) != 0) continue;
+
+            int col_idx = schema_find_column(child_schema, fk->col_name);
+            if (col_idx < 0) continue;
+
+            // Full scan of the child table to see if any row references this parent key
+            Table child_table = {
+                .pager = db->pager,
+                .root_page_num = db->tables[i].root_page_num,
+                .schema = *child_schema,
+                .db = db
+            };
+
+            Cursor* cur = table_start(&child_table);
+            DynamicRow row;
+            while (!cur->end_of_table) {
+                deserialize_row(cursor_value(cur), &row, child_schema);
+                if ((uint32_t)row.values[col_idx].int_val == parent_pk_val) {
+                    free(cur);
+                    return true; // Constraint violated: child record exists
+                }
+                cursor_advance(cur);
+            }
+            free(cur);
+        }
+    }
+    return false;
+}
 
 
 bool row_matches_where(const DynamicRow* row, const Statement* statement, const Schema* schema) {
@@ -103,6 +171,21 @@ bool row_matches_where(const DynamicRow* row, const Statement* statement, const 
 }
 
 ExecuteResult execute_insert(Statement* statement, Table* table) {
+
+	// Inside execute_insert(Statement* statement, Table* table):
+for (uint32_t i = 0; i < table->schema.num_foreign_keys; i++) {
+    const ForeignKey* fk = &table->schema.foreign_keys[i];
+    if (!fk->in_use) continue;
+
+    int col_idx = schema_find_column(&table->schema, fk->col_name);
+    if (col_idx >= 0 && (uint32_t)col_idx < statement->row_to_insert.num_values) {
+        uint32_t ref_val = (uint32_t)statement->row_to_insert.values[col_idx].int_val;
+        if (!fk_parent_exists(table->db, fk->ref_table, ref_val)) {
+            return EXECUTE_FOREIGN_KEY_VIOLATION;
+        }
+    }
+}
+
     if (table->pager->num_pages + INSERT_PAGE_SAFETY_MARGIN > TABLE_MAX_PAGES) {
         return EXECUTE_TABLE_FULL;
     }
@@ -272,6 +355,15 @@ ExecuteResult execute_delete(Statement* statement, Table* table) {
             free(cursor);
         }
     }
+
+
+// Inside execute_delete(Statement* statement, Table* table):
+for (uint32_t i = 0; i < delete_count; i++) {
+    uint32_t key = keys_to_delete[i];
+    if (fk_child_reference_exists(table->db, table->schema.table_name, key)) {
+        return EXECUTE_FOREIGN_KEY_VIOLATION;
+    }
+}
 
     // Perform deletions
     for (uint32_t i = 0; i < delete_count; i++) {
@@ -680,6 +772,22 @@ ExecuteResult execute_create(Statement* statement, Database* db) {
 }
 
 ExecuteResult execute_drop(Statement* statement, Database* db) {
+
+	// Inside execute_drop(Statement* statement, Database* db):
+for (uint32_t i = 0; i < MAX_TABLES; i++) {
+    if (!db->tables[i].in_use) continue;
+    Schema* s = &db->tables[i].schema;
+    for (uint32_t f = 0; f < s->num_foreign_keys; f++) {
+        if (s->foreign_keys[f].in_use &&
+            strcasecmp_custom(s->foreign_keys[f].ref_table, statement->table_name) == 0) {
+            printf("Error: cannot drop table '%s' because table '%s' references it.\n",
+                   statement->table_name, s->table_name);
+            return EXECUTE_INVALID_OPERATION;
+        }
+    }
+}
+
+
     int idx = database_find_table_index(db, statement->table_name);
     if (idx < 0) {
         printf("Error: no such table '%s'.\n", statement->table_name);
