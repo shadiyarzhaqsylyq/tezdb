@@ -40,6 +40,18 @@
 // ============================================================================
 // Data Types
 // ============================================================================
+#define MAX_FOREIGN_KEYS 4
+
+typedef struct ForeignKey {
+    bool in_use;
+    char col_name[MAX_NAME_LEN];
+    char ref_table[MAX_NAME_LEN];
+    char ref_col[MAX_NAME_LEN];
+} ForeignKey;
+
+
+
+
 typedef enum DataType {
     DATA_TYPE_INT = 0,
     DATA_TYPE_VARCHAR = 1
@@ -61,6 +73,10 @@ typedef struct Schema {
     uint32_t num_columns;
     uint32_t row_size;
     uint32_t primary_key_index;
+
+	    // --- Foreign Keys ---
+    ForeignKey foreign_keys[MAX_FOREIGN_KEYS];
+    uint32_t num_foreign_keys;
 } Schema;
 
 typedef struct Value {
@@ -89,7 +105,8 @@ typedef enum ExecuteResult {
     EXECUTE_COLUMN_NOT_FOUND,
     EXECUTE_COLUMN_ALREADY_EXISTS,
     EXECUTE_TOO_MANY_COLUMNS,
-    EXECUTE_INVALID_OPERATION
+    EXECUTE_INVALID_OPERATION,
+	EXECUTE_FOREIGN_KEY_VIOLATION
 } ExecuteResult;
 
 typedef enum MetaCommandResult {
