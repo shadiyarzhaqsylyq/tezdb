@@ -113,7 +113,7 @@ SELECT * FROM emp WHERE (city = 'SF' AND dep = 'HR') OR id < 3;
 (3, 'Charlie', '2020B-2001a', 'HR', 4000, 'SF')
 (5, 'Evan', '3030C-3001a', 'HR', 3500, 'SF')
 
-SELECT * FROM emp WHERE dep = 'HR' AND (city = 'SF' OR d = 'NY');
+SELECT * FROM emp WHERE dep = 'HR' AND (city = 'SF' OR city = 'NY');
 (5, 'Evan', '3030C-3001a', 'HR', 3500, 'SF')
 (6, 'Frank', '3030C-3001b', 'HR', 11000, 'NY')
 
