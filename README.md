@@ -59,9 +59,6 @@ DELETE FROM table WHERE a = '' AND b = '';
 DELETE FROM table WHERE (a = '' AND b = '') OR c <= '';
 DELETE FROM table WHERE a > '' AND (b = '' OR c = '');
 
-SELECT COUNT(*) FROM table;
-SELECT COUNT(*) FROM table WHERE <expr>;
-
 
 
 DROP/ALTER TABLE
@@ -92,7 +89,9 @@ SELECT * FROM table ORDER BY id LIMIT 4 OFFSET 2; --skips first 2 rows returns 4
 SELECT * FROM table ORDER BY id DESC LIMIT 4 OFFSET 2;
 
 
-
+Aggregates
+SELECT COUNT(*) FROM table;
+SELECT COUNT(*) FROM table WHERE <expr>;
 SELECT SUM(col) FROM table;
 SELECT AVG(col) FROM table;
 SELECT MIN(col) FROM table;
