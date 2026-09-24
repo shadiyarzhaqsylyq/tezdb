@@ -58,6 +58,9 @@ static void run_statement(const char* input, Database* db) {
                 printf("ROLLBACK\n");
             }
             break;
+		case EXECUTE_FOREIGN_KEY_VIOLATION:
+			printf("Error: foreign key constraint violation.\n");
+			break;
         case EXECUTE_DUPLICATE_KEY:
             printf("Error: Duplicate key.\n");
             break;
