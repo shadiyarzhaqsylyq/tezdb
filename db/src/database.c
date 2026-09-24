@@ -36,16 +36,19 @@ uint32_t allocate_page(Database* db) {
     uint32_t page_num;
     if (db->num_free_pages > 0) {
         page_num = db->free_pages[--db->num_free_pages];
+		persist_free_list(db);
     } else {
         page_num = db->pager->num_pages;
     }
-    persist_free_list(db);
+    \
     return page_num;
 }
 
 void free_page(Database* db, uint32_t page_num) {
     if (db->num_free_pages < TABLE_MAX_PAGES) {
         db->free_pages[db->num_free_pages++] = page_num;
+		
+		persist_free_list(db);
     }
 }
 
@@ -142,6 +145,7 @@ Database* database_open(const char* filename) {
 }
 
 void database_close(Database* db) {
+	persist_free_list(db);
     tx_free_backups(db);
     for (uint32_t i = 0; i < db->pager->num_pages; i++) {
         if (db->pager->pages[i] == NULL) continue;
