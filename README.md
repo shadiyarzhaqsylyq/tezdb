@@ -21,7 +21,7 @@ Operators - >=, <=, =, <, >, !=, <>
 
 != and <> have the same meaning "not equal to".
 
-Column projection, Batch Execution / File Loading
+Column projection, Batch Execution / File Loading, Inner Join
 ```
 *CREATE*
 CREATE TABLE table (a INT PRIMARY KEY, b VARCHAR, c VARCHAR, d VARCHAR, f INT, g VARCHAR);
