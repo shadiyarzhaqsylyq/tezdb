@@ -28,7 +28,7 @@ CREATE TABLE table (a INT PRIMARY KEY, b VARCHAR, c VARCHAR, d VARCHAR, f INT, g
 
 
 *INSERT*
-INSERT INTO table VALUES (PK num, 'char', 'char', 'char', int num, 'char');
+INSERT INTO table VALUES (number, 'char', 'char', 'char', int num, 'char');
 
 *SELECT*
 SELECT * FROM table;
