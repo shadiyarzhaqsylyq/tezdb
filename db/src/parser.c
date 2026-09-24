@@ -339,6 +339,31 @@ PrepareResult prepare_statement(TokenList* list, const Database* db, Statement* 
             }
 
             schema_add_column(&statement->created_schema, col_name.text, dt, len, is_pk);
+			
+
+			// --- Parse REFERENCES <parent_table>(<parent_col>) ---
+			if (strcasecmp_custom(peek_token(list).text, "references") == 0) {
+				advance_token(list); // consume 'REFERENCES'
+				Token parent_tbl = advance_token(list);
+				
+				char parent_col[MAX_NAME_LEN] = "id"; // default to "id" if omitted
+				if (strcmp(peek_token(list).text, "(") == 0) {
+					advance_token(list); // consume '('
+					Token p_col = advance_token(list);
+					strncpy(parent_col, p_col.text, MAX_NAME_LEN - 1);
+					if (strcmp(peek_token(list).text, ")") == 0) advance_token(list);
+				}
+				
+				Schema* s = &statement->created_schema;
+				if (s->num_foreign_keys < MAX_FOREIGN_KEYS) {
+					ForeignKey* fk = &s->foreign_keys[s->num_foreign_keys++];
+					fk->in_use = true;
+					strncpy(fk->col_name, col_name.text, MAX_NAME_LEN - 1);
+					strncpy(fk->ref_table, parent_tbl.text, MAX_NAME_LEN - 1);
+					strncpy(fk->ref_col, parent_col, MAX_NAME_LEN - 1);
+				}
+			}
+
 
             if (strcmp(peek_token(list).text, ",") == 0) advance_token(list);
         }
