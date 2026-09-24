@@ -60,7 +60,7 @@ DELETE FROM table WHERE (a = '' AND b = '') OR c <= '';
 DELETE FROM table WHERE a > '' AND (b = '' OR c = '');
 
 
-
+Not supported
 DROP/ALTER TABLE
 DROP TABLE table;
 ALTER TABLE table DROP [Column] <col>;
@@ -68,12 +68,12 @@ ALTER TABLE table ADD [Column] <col> int|VARCHAR(n);
 ALTER TABLE table RENAME TO <new name>;
 ALTER TABLE table RENAME COLUMN <old> TO <new>;
 
-
+Not supported
 SELECT * FROM table ORDER BY <col>; --ORDER BY uses ASC by default. works on VARCHAR too
 SELECT * FROM table ORDER BY <col> DESC; --ASC/DESC work without ORDER BY, but with ORDER BY is better.
 SELECT * FROM table ORDER BY <col> ASC;  
 
-
+Not supported
 *LIMIT/OFFSET* 
 Composable with ORDER BY, WHERE
 SELECT * FROM table ORDER BY id DESC; --returns rows in Descending order
@@ -88,7 +88,7 @@ SELECT * FROM table ORDER BY id DESC LIMIT 2;
 SELECT * FROM table ORDER BY id LIMIT 4 OFFSET 2; --skips first 2 rows returns 4 next rows
 SELECT * FROM table ORDER BY id DESC LIMIT 4 OFFSET 2;
 
-
+Not supported
 Aggregates
 SELECT COUNT(*) FROM table;
 SELECT COUNT(*) FROM table WHERE <expr>;
@@ -98,7 +98,7 @@ SELECT MIN(col) FROM table;
 SELECT MAX(col) FROM table;
 
 
-
+Not supported
 *JOIN*
 
 -- basic inner join
@@ -122,6 +122,7 @@ gcc -Wall -Wextra db.c -o db
 ./db db.sql
 ./db sql
 
+Not supported
 Batch Execution / File Loading
 ./db sql < init.sql
 ```
