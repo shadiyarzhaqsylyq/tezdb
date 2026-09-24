@@ -1,3 +1,4 @@
+//#define _POSIX_C_SOURCE 200809L // for pread/pwrite/ftruncate declarations
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
