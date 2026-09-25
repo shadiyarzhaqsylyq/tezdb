@@ -1631,7 +1631,12 @@ ExecuteResult execute_update(Statement* statement, Table* table) {
 }
 
 ExecuteResult execute_delete(Statement* statement, Table* table) {
-    static uint32_t keys_to_delete[PAGE_SIZE];
+    uint32_t capacity = 16;
+    uint32_t* keys_to_delete = (uint32_t*)malloc(capacity * sizeof(uint32_t));
+    if (!keys_to_delete) {
+        fprintf(stderr, "Error: out of memory for delete keys\n");
+        exit(EXIT_FAILURE);
+    }
     uint32_t delete_count = 0;
 
     Cursor* cursor = table_start(table);
@@ -1640,9 +1645,15 @@ ExecuteResult execute_delete(Statement* statement, Table* table) {
     while (!cursor->end_of_table) {
         deserialize_row(cursor_value(cursor), &row, &table->schema);
         if (row_matches_where(&row, statement, &table->schema)) {
-            if (delete_count < PAGE_SIZE) {
-                keys_to_delete[delete_count++] = get_pk_value(&row, &table->schema);
+            if (delete_count == capacity) {
+                capacity *= 2;
+                keys_to_delete = (uint32_t*)realloc(keys_to_delete, capacity * sizeof(uint32_t));
+                if (!keys_to_delete) {
+                    fprintf(stderr, "Error: out of memory reallocating delete keys\n");
+                    exit(EXIT_FAILURE);
+                }
             }
+            keys_to_delete[delete_count++] = get_pk_value(&row, &table->schema);
         }
         cursor_advance(cursor);
     }
@@ -1658,6 +1669,9 @@ ExecuteResult execute_delete(Statement* statement, Table* table) {
         }
         free(c);
     }
+
+    free(keys_to_delete);
+
     printf("DELETE %u\n", delete_count);
     return EXECUTE_SUCCESS;
 }
