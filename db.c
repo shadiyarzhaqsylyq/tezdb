@@ -780,16 +780,170 @@ void cursor_advance(Cursor* cursor) {
     }
 }
 
+
+
+/*
+ * Slices an empty leaf out of the singly-linked leaf chain.
+ */
+static void unlink_leaf_sibling(Table* table, uint32_t page_num) {
+    void* node_to_delete = pager_get_page(table->pager, page_num);
+    uint32_t next_page = *leaf_node_next_leaf(node_to_delete);
+
+    Cursor* c = table_start(table);
+    if (c->page_num == page_num) {
+        // The deleted page was the first leaf in the table
+        free(c);
+        return;
+    }
+
+    uint32_t curr = c->page_num;
+    while (curr != 0) {
+        void* curr_node = pager_get_page(table->pager, curr);
+        if (*leaf_node_next_leaf(curr_node) == page_num) {
+            *leaf_node_next_leaf(curr_node) = next_page;
+            break;
+        }
+        curr = *leaf_node_next_leaf(curr_node);
+    }
+    free(c);
+}
+
+/*
+ * Recursively updates stale keys in parent/ancestor nodes when a child's
+ * maximum key changes from old_key to new_key.
+ */
+void update_ancestor_keys(Table* table, uint32_t node_page_num, uint32_t old_key, uint32_t new_key) {
+    void* node = pager_get_page(table->pager, node_page_num);
+    
+    // Stop if we have reached the root (root has no parent)
+    if (is_node_root(node)) {
+        return;
+    }
+
+    uint32_t parent_page_num = *node_parent(node);
+    void* parent = pager_get_page(table->pager, parent_page_num);
+    uint32_t num_keys = *internal_node_num_keys(parent);
+
+    // Search for old_key in parent's internal keys
+    for (uint32_t i = 0; i < num_keys; i++) {
+        if (*internal_node_key(parent, i) == old_key) {
+            *internal_node_key(parent, i) = new_key;
+            // The key was a separator in this parent; ancestors don't hold old_key
+            return;
+        }
+    }
+
+    // If not found in the parent's keys, this child was the parent's right_child.
+    // That means old_key was the maximum key for the ENTIRE parent node.
+    // We must propagate this update to the grandparent.
+    if (*internal_node_right_child(parent) == node_page_num) {
+        update_ancestor_keys(table, parent_page_num, old_key, new_key);
+    }
+}
+
+
+
+/*
+ * Handles removing an emptied leaf page from the B+Tree and collapsing
+ * the root if the tree height shrinks.
+ */
+void handle_empty_leaf_node(Table* table, uint32_t leaf_page_num, uint32_t old_max) {
+    void* leaf = pager_get_page(table->pager, leaf_page_num);
+    if (is_node_root(leaf)) {
+        return; // Empty root leaf simply represents an empty table
+    }
+
+    // 1. Unlink from sibling leaf list
+    unlink_leaf_sibling(table, leaf_page_num);
+
+    uint32_t parent_page_num = *node_parent(leaf);
+    void* parent = pager_get_page(table->pager, parent_page_num);
+    uint32_t num_keys = *internal_node_num_keys(parent);
+
+    // 2. Remove the empty child from parent internal node
+    if (*internal_node_right_child(parent) == leaf_page_num) {
+        if (num_keys > 0) {
+            // Promote child[num_keys - 1] to become right_child
+            uint32_t new_right = *internal_node_child(parent, num_keys - 1);
+            *internal_node_right_child(parent) = new_right;
+            *internal_node_num_keys(parent) = num_keys - 1;
+
+            // Parent's maximum key is now the max key of its new right_child
+            uint32_t new_parent_max = get_node_max_key(table, pager_get_page(table->pager, new_right));
+            update_ancestor_keys(table, parent_page_num, old_max, new_parent_max);
+        }
+    } else {
+        int target_idx = -1;
+        for (uint32_t i = 0; i < num_keys; i++) {
+            if (*internal_node_child(parent, i) == leaf_page_num) {
+                target_idx = (int)i;
+                break;
+            }
+        }
+
+        if (target_idx >= 0) {
+            // Shift cells left to overwrite the deleted child
+            for (uint32_t i = (uint32_t)target_idx; i < num_keys - 1; i++) {
+                void* dest = internal_node_cell(parent, i);
+                void* src = internal_node_cell(parent, i + 1);
+                memcpy(dest, src, INTERNAL_NODE_CELL_SIZE);
+            }
+            *internal_node_num_keys(parent) = num_keys - 1;
+        }
+    }
+
+    // 3. Root Collapse: internal root with 0 keys -> promote its sole child to root
+    if (is_node_root(parent) && *internal_node_num_keys(parent) == 0) {
+        uint32_t new_root_page = *internal_node_right_child(parent);
+        void* new_root_node = pager_get_page(table->pager, new_root_page);
+
+        set_node_root(new_root_node, true);
+        *node_parent(new_root_node) = 0;
+        table->root_page_num = new_root_page;
+
+        // Persist new root pointer to Page 0 metadata
+        MetaPage* meta = (MetaPage*)pager_get_page(table->pager, 0);
+        meta->root_page_num = new_root_page;
+    }
+}
+
+
 void leaf_node_delete(Cursor* cursor) {
-    void* node = pager_get_page(cursor->table->pager, cursor->page_num);
+    Table* table = cursor->table;
+    void* node = pager_get_page(table->pager, cursor->page_num);
     uint32_t num_cells = *leaf_node_num_cells(node);
-    uint32_t cell_sz = leaf_node_cell_size(cursor->table->schema.row_size);
+    uint32_t row_size = table->schema.row_size;
+    uint32_t cell_sz = leaf_node_cell_size(row_size);
+
+    if (num_cells == 0 || cursor->cell_num >= num_cells) {
+        return;
+    }
+
+    bool is_max_key = (cursor->cell_num == num_cells - 1);
+    uint32_t old_max = *leaf_node_key(node, num_cells - 1, row_size);
+
     for (uint32_t i = cursor->cell_num; i < num_cells - 1; i++) {
-        memcpy(leaf_node_cell(node, i, cursor->table->schema.row_size),
-               leaf_node_cell(node, i + 1, cursor->table->schema.row_size), cell_sz);
+        memcpy(leaf_node_cell(node, i, row_size),
+               leaf_node_cell(node, i + 1, row_size), cell_sz);
     }
     *(leaf_node_num_cells(node)) -= 1;
+    uint32_t remaining_cells = *leaf_node_num_cells(node);
+
+    // Propagate updates or clean up empty leaf
+    if (remaining_cells > 0) {
+        if (is_max_key && !is_node_root(node)) {
+            uint32_t new_max = *leaf_node_key(node, remaining_cells - 1, row_size);
+            update_ancestor_keys(table, cursor->page_num, old_max, new_max);
+        }
+    } else {
+        if (!is_node_root(node)) {
+            handle_empty_leaf_node(table, cursor->page_num, old_max);
+        }
+    }
 }
+
+
+
 
 uint32_t get_unused_page_num(Table* table) {
     // 1. Enforce that new allocations start at Page 2 or higher
@@ -850,10 +1004,7 @@ void create_new_root(Table* table, uint32_t right_child_page_num) {
     meta->root_page_num = table->root_page_num;
 }
 
-void update_internal_node_key(void* node, uint32_t old_key, uint32_t new_key) {
-    uint32_t old_child_index = internal_node_find_child(node, old_key);
-    *internal_node_key(node, old_child_index) = new_key;
-}
+
 
 void internal_node_split_and_insert(Table* table, uint32_t parent_page_num, uint32_t child_page_num);
 
@@ -943,13 +1094,35 @@ void internal_node_split_and_insert(Table* table, uint32_t parent_page_num, uint
     internal_node_insert(table, destination_page_num, child_page_num);
     *node_parent(child) = destination_page_num;
 
-    update_internal_node_key(parent, old_max, get_node_max_key(table, old_node));
+    // --- Key Propagation & Ancestor Fixup ---
+    if (splitting_root) {
+        // Root was split: parent is the new root, old_node is child 0
+        *internal_node_key(parent, 0) = get_node_max_key(table, old_node);
+    } else {
+        uint32_t parent_of_split_page_num = *node_parent(old_node);
+        void* parent_of_split = pager_get_page(table->pager, parent_of_split_page_num);
+        bool is_right_child = (*internal_node_right_child(parent_of_split) == old_page_num);
+        uint32_t new_old_max = get_node_max_key(table, old_node);
 
-    if (!splitting_root) {
-        internal_node_insert(table, *node_parent(old_node), new_page_num);
-        *node_parent(new_node) = *node_parent(old_node);
+        *node_parent(new_node) = parent_of_split_page_num;
+
+        if (!is_right_child) {
+            // old_node is an indexed key in parent_of_split: update old_max -> new_old_max
+            update_ancestor_keys(table, old_page_num, old_max, new_old_max);
+            internal_node_insert(table, parent_of_split_page_num, new_page_num);
+        } else {
+            // old_node is right_child: insert new_node into parent_of_split
+            internal_node_insert(table, parent_of_split_page_num, new_page_num);
+
+            // If new_node has a different max than old_max, propagate upward
+            uint32_t new_right_max = get_node_max_key(table, new_node);
+            if (new_right_max != old_max) {
+                update_ancestor_keys(table, parent_of_split_page_num, old_max, new_right_max);
+            }
+        }
     }
 }
+
 
 void leaf_node_split_and_insert(Cursor* cursor, uint32_t key, DynamicRow* value) {
     Table* table = cursor->table;
@@ -995,10 +1168,25 @@ void leaf_node_split_and_insert(Cursor* cursor, uint32_t key, DynamicRow* value)
         create_new_root(table, new_page_num);
     } else {
         uint32_t parent_page_num = *node_parent(old_node);
-        uint32_t new_max = get_node_max_key(table, old_node);
         void* parent = pager_get_page(table->pager, parent_page_num);
-        update_internal_node_key(parent, old_max, new_max);
-        internal_node_insert(table, parent_page_num, new_page_num);
+        bool is_right_child = (*internal_node_right_child(parent) == cursor->page_num);
+        uint32_t new_max = get_node_max_key(table, old_node);
+
+        if (!is_right_child) {
+            // old_node is an indexed child: update old_max -> new_max in ancestors
+            update_ancestor_keys(table, cursor->page_num, old_max, new_max);
+            internal_node_insert(table, parent_page_num, new_page_num);
+        } else {
+            // old_node is right_child: internal_node_insert moves old_node into
+            // parent's cells with new_max, and installs new_node as the new right_child
+            internal_node_insert(table, parent_page_num, new_page_num);
+
+            // If the new right_child's max grew beyond old_max, propagate to parent's ancestors
+            uint32_t new_right_max = get_node_max_key(table, new_node);
+            if (new_right_max != old_max) {
+                update_ancestor_keys(table, parent_page_num, old_max, new_right_max);
+            }
+        }
     }
 }
 
