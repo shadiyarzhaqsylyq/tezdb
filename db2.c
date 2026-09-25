@@ -41,6 +41,7 @@ typedef struct ColumnDef {
 
 typedef struct Schema {
     bool has_schema;
+	bool has_primary_key;
     char table_name[MAX_NAME_LEN];
     ColumnDef columns[MAX_COLUMNS];
     uint32_t num_columns;
@@ -58,21 +59,21 @@ static void schema_add_column(Schema* schema, const char* name, DataType type, u
     col->is_primary_key = is_pk;
     col->offset = schema->row_size;
 
-
     if (type == DATA_TYPE_INT) {
         col->length = 0;
         col->size = sizeof(int32_t);
     } else { // VARCHAR
-		uint32_t effective_len = (length > 0) ? length : 32;
-		// Defence-in-depth: Cap length so col->size never exceeds MAX_STR_LEN
-		if(effective_len >= MAX_STR_LEN){
-		effective_len = MAX_STR_LEN - 1;
-		}
-			col->length = effective_len;
-			col->size = col->length + 1; // Null terminated string buffer
+        uint32_t effective_len = (length > 0) ? length : 32;
+        // Defence-in-depth: Cap length so col->size never exceeds MAX_STR_LEN
+        if (effective_len >= MAX_STR_LEN) {
+            effective_len = MAX_STR_LEN - 1;
+        }
+        col->length = effective_len;
+        col->size = col->length + 1; // Null terminated string buffer
     }
 
     if (is_pk) {
+        schema->has_primary_key = true;
         schema->primary_key_index = schema->num_columns;
     }
 
@@ -117,10 +118,17 @@ typedef struct DynamicRow {
 } DynamicRow;
 
 static uint32_t get_pk_value(const DynamicRow* row, const Schema* schema) {
-    if (schema->primary_key_index < row->num_values) {
-        return (uint32_t)row->values[schema->primary_key_index].int_val;
+    if (!schema->has_primary_key || schema->primary_key_index >= row->num_values) {
+        fprintf(stderr, "Fatal error: Table schema has no primary key or column index is out of bounds.\n");
+        exit(EXIT_FAILURE);
     }
-    return 0;
+
+    if (schema->columns[schema->primary_key_index].type != DATA_TYPE_INT) {
+        fprintf(stderr, "Fatal error: Primary key column must be of type INT.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    return (uint32_t)row->values[schema->primary_key_index].int_val;
 }
 
 typedef enum ExecuteResult {
@@ -674,41 +682,60 @@ Table* table_open(const char* filename) {
     }
 
     if (table->pager->num_pages == 0) {
-
-		// Reserve Page 0 strictly for Database and Schema Metadata
+        // Reserve Page 0 strictly for Database and Schema Metadata
         table->root_page_num = 1;
         memset(&table->schema, 0, sizeof(Schema));
         table->schema.has_schema = false;
+        table->schema.has_primary_key = false;
 
         MetaPage* meta = (MetaPage*)pager_get_page(table->pager, 0);
-		memset(meta, 0, PAGE_SIZE);
+        memset(meta, 0, PAGE_SIZE);
         meta->magic = SCHEMA_MAGIC;
         meta->root_page_num = table->root_page_num;
         meta->schema = table->schema;
-		
-		// Initialize Page 1 as the B+Tree Root Node (Leaf)
+
+        // Initialize Page 1 as the B+Tree Root Node (Leaf)
         void* root_node = pager_get_page(table->pager, table->root_page_num);
-		memset(root_node, 0, PAGE_SIZE);
+        memset(root_node, 0, PAGE_SIZE);
         initialize_leaf_node(root_node);
         set_node_root(root_node, true);
 
-		// Ensure pager reflects both reserved pages (Page 0 and Page 1)
-		if(table->pager->num_pages < 2){
-			table->pager->num_pages = 2;
-		
-		}
-
+        // Ensure pager reflects both reserved pages (Page 0 and Page 1)
+        if (table->pager->num_pages < 2) {
+            table->pager->num_pages = 2;
+        }
     } else {
-		// Read Page 0 to locate the true root page and schema
+        // Read Page 0 to locate the true root page and schema
         MetaPage* meta = (MetaPage*)pager_get_page(table->pager, 0);
         if (meta->magic == SCHEMA_MAGIC) {
             table->root_page_num = meta->root_page_num;
             table->schema = meta->schema;
+
+            // Validate and synchronize primary key metadata for loaded tables
+            if (table->schema.has_schema) {
+                bool found_pk = false;
+                for (uint32_t i = 0; i < table->schema.num_columns; i++) {
+                    if (table->schema.columns[i].is_primary_key) {
+                        if (table->schema.columns[i].type == DATA_TYPE_INT) {
+                            table->schema.primary_key_index = i;
+                            table->schema.has_primary_key = true;
+                            found_pk = true;
+                        }
+                        break;
+                    }
+                }
+
+                if (!found_pk) {
+                    fprintf(stderr, "Warning: Persisted schema does not have a valid INT PRIMARY KEY.\n");
+                    table->schema.has_primary_key = false;
+                }
+            }
         } else {
-			fprintf(stderr, "Error: DB file missing valid SCHEMA_MAGIC on Page 0.\n");
+            fprintf(stderr, "Error: DB file missing valid SCHEMA_MAGIC on Page 0.\n");
             table->root_page_num = 1;
             memset(&table->schema, 0, sizeof(Schema));
             table->schema.has_schema = false;
+            table->schema.has_primary_key = false;
         }
     }
     return table;
@@ -1706,6 +1733,8 @@ PrepareResult parse_where_clause(TokenList* list, const Schema* schema, Statemen
     return parse_expr(list, schema, &statement->where);
 }
 
+
+
 PrepareResult prepare_statement(TokenList* list, const Schema* schema, Statement* statement) {
     memset(statement, 0, sizeof(Statement));
     if (list->count == 0 || peek_token(list).kind == TOKEN_END) {
@@ -1728,6 +1757,8 @@ PrepareResult prepare_statement(TokenList* list, const Schema* schema, Statement
         memset(&statement->created_schema, 0, sizeof(Schema));
         strncpy(statement->created_schema.table_name, tbl.text, MAX_NAME_LEN - 1);
 
+        uint32_t pk_count = 0;
+
         while (list->cursor < list->count && strcmp(peek_token(list).text, ")") != 0) {
             Token col_name = advance_token(list);
             if (col_name.kind != TOKEN_IDENTIFIER) return PREPARE_SYNTAX_ERROR;
@@ -1746,10 +1777,10 @@ PrepareResult prepare_statement(TokenList* list, const Schema* schema, Statement
                     Token len_tok = advance_token(list);
                     len = (uint32_t)strtoul(len_tok.text, NULL, 10);
 
-					// Ensure VARCHAR capacity fits within Value.str_val (including null terminator)
-					if(len == 0 || len >= MAX_STR_LEN){
-					return PREPARE_STRING_TOO_LONG;
-					}
+                    // Ensure VARCHAR capacity fits within Value.str_val (including null terminator)
+                    if (len == 0 || len >= MAX_STR_LEN) {
+                        return PREPARE_STRING_TOO_LONG;
+                    }
 
                     if (strcmp(peek_token(list).text, ")") == 0) advance_token(list);
                 }
@@ -1762,6 +1793,13 @@ PrepareResult prepare_statement(TokenList* list, const Schema* schema, Statement
                 advance_token(list);
                 if (strcasecmp_custom(peek_token(list).text, "key") == 0) advance_token(list);
                 is_pk = true;
+                pk_count++;
+
+                // Enforce that PRIMARY KEY must be an INT
+                if (dt != DATA_TYPE_INT) {
+                    printf("Error: PRIMARY KEY must be of type INT.\n");
+                    return PREPARE_SYNTAX_ERROR;
+                }
             }
 
             schema_add_column(&statement->created_schema, col_name.text, dt, len, is_pk);
@@ -1772,6 +1810,17 @@ PrepareResult prepare_statement(TokenList* list, const Schema* schema, Statement
         }
 
         if (strcmp(peek_token(list).text, ")") == 0) advance_token(list);
+
+        // Enforce that exactly one PRIMARY KEY column exists
+        if (pk_count != 1) {
+            if (pk_count == 0) {
+                printf("Error: Table must define an INT PRIMARY KEY column.\n");
+            } else {
+                printf("Error: Multiple PRIMARY KEY columns are not supported.\n");
+            }
+            return PREPARE_SYNTAX_ERROR;
+        }
+
         return PREPARE_SUCCESS;
     }
 
@@ -1813,14 +1862,12 @@ PrepareResult prepare_statement(TokenList* list, const Schema* schema, Statement
 
         for (uint32_t i = 0; i < schema->num_columns; ++i) {
             Token val_tok = advance_token(list);
-			int sign = 1;
-			if(schema->columns[i].type == DATA_TYPE_INT && strcmp(val_tok.text, "-") == 0){
-			sign = -1;
-			val_tok = advance_token(list);	
+            int sign = 1;
+            if (schema->columns[i].type == DATA_TYPE_INT && strcmp(val_tok.text, "-") == 0) {
+                sign = -1;
+                val_tok = advance_token(list);
+            }
 
-			}
-
-			
             if (strcmp(peek_token(list).text, ",") == 0) advance_token(list);
 
             Value* v = &statement->row_to_insert.values[i];
@@ -1830,9 +1877,9 @@ PrepareResult prepare_statement(TokenList* list, const Schema* schema, Statement
                 char* endptr;
                 long int_v = strtol(val_tok.text, &endptr, 10);
                 if (*endptr != '\0') return PREPARE_SYNTAX_ERROR;
-				int_v *= sign;
-				if(schema->columns[i].is_primary_key && int_v < 0) return PREPARE_NEGATIVE_ID;
-				v->int_val = (int32_t)int_v;
+                int_v *= sign;
+                if (schema->columns[i].is_primary_key && int_v < 0) return PREPARE_NEGATIVE_ID;
+                v->int_val = (int32_t)int_v;
             } else {
                 if (strlen(val_tok.text) > schema->columns[i].length) return PREPARE_STRING_TOO_LONG;
                 strncpy(v->str_val, val_tok.text, MAX_STR_LEN - 1);
@@ -1908,6 +1955,8 @@ PrepareResult prepare_statement(TokenList* list, const Schema* schema, Statement
 
     return PREPARE_UNRECOGNIZED_STATEMENT;
 }
+
+
 
 // ============================================================================
 // Execution Engine
@@ -2319,6 +2368,7 @@ bool preprocess_input(char** line_ptr) {
     return true;
 }
 
+
 void execute_line(char* raw_line, Table* table) {
     char* line = raw_line;
     if (!preprocess_input(&line)) {
@@ -2363,10 +2413,11 @@ void execute_line(char* raw_line, Table* table) {
             return;
     }
 
-    if (!table->schema.has_schema &&
+    // Block queries if the schema is missing or invalid
+    if ((!table->schema.has_schema || !table->schema.has_primary_key) &&
         (statement.type == STATEMENT_INSERT || statement.type == STATEMENT_SELECT ||
          statement.type == STATEMENT_UPDATE || statement.type == STATEMENT_DELETE)) {
-        printf("Error: No table schema found. Please run CREATE TABLE first.\n");
+        printf("Error: No valid table schema with an INT PRIMARY KEY found. Please run CREATE TABLE first.\n");
         free_expr(statement.where);
         return;
     }
