@@ -1303,6 +1303,12 @@ void tokenize_input(const char* input, TokenList* list) {
             continue;
         }
 
+
+
+        if (input[pos] == '-' && pos + 1 < len && input[pos + 1] == '-') {
+            break; // Stop tokenizing; remainder of the line is a comment
+        }
+
         // Two-character operators: <=, >=, !=, <>
         if (pos + 1 < len) {
             char op2[3] = {input[pos], input[pos + 1], '\0'};
@@ -1316,7 +1322,9 @@ void tokenize_input(const char* input, TokenList* list) {
             }
         }
 
-        if (strchr("=<>(),*", input[pos]) != NULL) {
+        // 2. Standalone minus or other single-character symbols
+        bool is_standalone_minus = (input[pos] == '-' && (pos + 1 >= len || !isdigit((unsigned char)input[pos + 1])));
+        if (strchr("=<>(),*", input[pos]) != NULL || is_standalone_minus) {
             list->tokens[list->count].kind = TOKEN_SYMBOL;
             list->tokens[list->count].text[0] = input[pos];
             list->tokens[list->count].text[1] = '\0';
@@ -1325,9 +1333,17 @@ void tokenize_input(const char* input, TokenList* list) {
             continue;
         }
 
-        if (isdigit((unsigned char)input[pos])) {
+
+		if (isdigit((unsigned char)input[pos]) || 
+            (input[pos] == '-' && pos + 1 < len && isdigit((unsigned char)input[pos + 1]))) {
             char num[MAX_STR_LEN] = {0};
             size_t num_pos = 0;
+
+            // Capture optional leading negative sign
+            if (input[pos] == '-') {
+                num[num_pos++] = input[pos++];
+            }
+
             while (pos < len && isdigit((unsigned char)input[pos]) && num_pos < MAX_STR_LEN - 1) {
                 num[num_pos++] = input[pos++];
             }
@@ -1597,6 +1613,14 @@ PrepareResult prepare_statement(TokenList* list, const Schema* schema, Statement
 
         for (uint32_t i = 0; i < schema->num_columns; ++i) {
             Token val_tok = advance_token(list);
+			int sign = 1;
+			if(schema->columns[i].type == DATA_TYPE_INT && strcmp(val_tok.text, "-") == 0){
+			sign = -1;
+			val_tok = advance_token(list);	
+
+			}
+
+			
             if (strcmp(peek_token(list).text, ",") == 0) advance_token(list);
 
             Value* v = &statement->row_to_insert.values[i];
@@ -1606,8 +1630,9 @@ PrepareResult prepare_statement(TokenList* list, const Schema* schema, Statement
                 char* endptr;
                 long int_v = strtol(val_tok.text, &endptr, 10);
                 if (*endptr != '\0') return PREPARE_SYNTAX_ERROR;
-                if (schema->columns[i].is_primary_key && int_v < 0) return PREPARE_NEGATIVE_ID;
-                v->int_val = (int32_t)int_v;
+				int_v *= sign;
+				if(schema->columns[i].is_primary_key && int_v < 0) return PREPARE_NEGATIVE_ID;
+				v->int_val = (int32_t)int_v;
             } else {
                 if (strlen(val_tok.text) > schema->columns[i].length) return PREPARE_STRING_TOO_LONG;
                 strncpy(v->str_val, val_tok.text, MAX_STR_LEN - 1);
