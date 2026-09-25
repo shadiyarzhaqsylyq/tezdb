@@ -519,12 +519,41 @@ void* pager_get_page(Pager* pager, uint32_t page_num) {
         // 2. Only read from disk if page actually exists within the file (page_num < npages)
         if (page_num < npages) {
             off_t offset = (off_t)page_num * PAGE_SIZE;
-            ssize_t bytes_read = pread(pager->file_descriptor, page, PAGE_SIZE, offset);
-            if (bytes_read == -1) {
-                printf("Error reading file: %d\n", errno);
-                free(page);
-                exit(EXIT_FAILURE);
-            }
+			size_t total_read = 0;
+
+			
+            while(total_read < PAGE_SIZE) {
+			ssize_t bytes_read = pread(
+			pager->file_descriptor,
+			(char*)page + total_read,
+			PAGE_SIZE - total_read,
+			offset + (off_t)total_read
+			);
+
+			if(bytes_read == -1) {
+				if(errno == EINTR){
+					continue; // Interrupted by system signal, retry
+				}
+				printf("Error reading page %u from file: %d\n", page_num, errno);
+				free(page);
+				exit(EXIT_FAILURE);
+				
+			}
+			
+			if(bytes_read == 0) {
+				printf("Error: Unexpected EOF while reading page %u\n", page_num);	
+				free(page);
+				exit(EXIT_FAILURE);			
+				}
+
+
+				total_read += (size_t)bytes_read;
+
+			
+
+			}//while
+
+
         }
 
         pager->pages[page_num] = page;
@@ -550,6 +579,16 @@ void pager_flush(Pager* pager, uint32_t page_num) {
         printf("Error writing: %d\n", errno);
         exit(EXIT_FAILURE);
     }
+
+
+	uint32_t written_end = (uint32_t)(offset + bytes_written);
+	if(written_end > pager->file_length) {
+	pager->file_length = written_end;
+
+	}
+
+
+
 }
 
 void pager_close(Pager* pager) {
@@ -577,6 +616,7 @@ typedef struct Table {
     // Transaction state
     bool in_transaction;
     uint32_t tx_original_num_pages;
+	uint32_t tx_original_file_length;
     void* tx_backup[TABLE_MAX_PAGES];
     bool tx_was_cached[TABLE_MAX_PAGES];
 
@@ -1942,6 +1982,7 @@ ExecuteResult execute_begin(Table* table) {
 
     table->in_transaction = true;
     table->tx_original_num_pages = table->pager->num_pages;
+	table->tx_original_file_length = table->pager->file_length;
 
 	table->tx_backup_root_page_num = table->root_page_num;
 	table->tx_backup_schema = table->schema;
@@ -2003,13 +2044,13 @@ ExecuteResult execute_rollback(Table* table) {
 	table->root_page_num = table->tx_backup_root_page_num;
 	table->schema = table->tx_backup_schema;
 
-	off_t new_file_length = (off_t)table->pager->num_pages * PAGE_SIZE;
+	off_t new_file_length = (off_t)table->tx_original_file_length;
 	if(ftruncate(table->pager->file_descriptor, new_file_length) == -1){
 	printf("Error truncating file during rollback: %d\n", errno);
 
 
 	}
-	table->pager->file_length = (uint32_t)new_file_length;
+	table->pager->file_length = table->tx_original_file_length;;
 
     table->in_transaction = false;
     return EXECUTE_SUCCESS;
