@@ -489,26 +489,36 @@ void* pager_get_page(Pager* pager, uint32_t page_num) {
     }
 
     if (pager->pages[page_num] == NULL) {
-        void* page = malloc(PAGE_SIZE);
-        uint32_t npages = pager->file_length / PAGE_SIZE;
-        if (pager->file_length % PAGE_SIZE) {
-            npages += 1;
+        // 1. Allocate zeroed memory to prevent garbage data in node/metadata headers
+        void* page = calloc(1, PAGE_SIZE);
+        if (!page) {
+            printf("Error: Failed to allocate memory for page %u\n", page_num);
+            exit(EXIT_FAILURE);
         }
-        if (page_num <= npages) {
+
+        uint32_t npages = pager->file_length / PAGE_SIZE;
+
+        // 2. Only read from disk if page actually exists within the file (page_num < npages)
+        if (page_num < npages) {
             off_t offset = (off_t)page_num * PAGE_SIZE;
             ssize_t bytes_read = pread(pager->file_descriptor, page, PAGE_SIZE, offset);
             if (bytes_read == -1) {
                 printf("Error reading file: %d\n", errno);
+                free(page);
                 exit(EXIT_FAILURE);
             }
         }
+
         pager->pages[page_num] = page;
+
+        // 3. Keep pager's page count in sync
         if (page_num >= pager->num_pages) {
             pager->num_pages = page_num + 1;
         }
     }
     return pager->pages[page_num];
 }
+
 
 void pager_flush(Pager* pager, uint32_t page_num) {
     if (pager->pages[page_num] == NULL) {
@@ -563,13 +573,15 @@ typedef struct Cursor {
 void initialize_leaf_node(void* node) {
     set_node_type(node, NODE_LEAF);
     set_node_root(node, false);
+	*node_parent(node) = 0; // 0 = no parent / sentinel
     *leaf_node_num_cells(node) = 0;
-    *leaf_node_next_leaf(node) = 0;
+    *leaf_node_next_leaf(node) = 0; // 0 = no next leaf (end of table)
 }
 
 void initialize_internal_node(void* node) {
     set_node_type(node, NODE_INTERNAL);
     set_node_root(node, false);
+	*node_parent(node) = 0; // 0 = no parent / sentinel
     *internal_node_num_keys(node) = 0;
     *internal_node_right_child(node) = INVALID_PAGE_NUM;
 }
@@ -601,24 +613,38 @@ Table* table_open(const char* filename) {
     }
 
     if (table->pager->num_pages == 0) {
+
+		// Reserve Page 0 strictly for Database and Schema Metadata
         table->root_page_num = 1;
         memset(&table->schema, 0, sizeof(Schema));
         table->schema.has_schema = false;
 
         MetaPage* meta = (MetaPage*)pager_get_page(table->pager, 0);
+		memset(meta, 0, PAGE_SIZE);
         meta->magic = SCHEMA_MAGIC;
         meta->root_page_num = table->root_page_num;
         meta->schema = table->schema;
-
+		
+		// Initialize Page 1 as the B+Tree Root Node (Leaf)
         void* root_node = pager_get_page(table->pager, table->root_page_num);
+		memset(root_node, 0, PAGE_SIZE);
         initialize_leaf_node(root_node);
         set_node_root(root_node, true);
+
+		// Ensure pager reflects both reserved pages (Page 0 and Page 1)
+		if(table->pager->num_pages < 2){
+			table->pager->num_pages = 2;
+		
+		}
+
     } else {
+		// Read Page 0 to locate the true root page and schema
         MetaPage* meta = (MetaPage*)pager_get_page(table->pager, 0);
         if (meta->magic == SCHEMA_MAGIC) {
             table->root_page_num = meta->root_page_num;
             table->schema = meta->schema;
         } else {
+			fprintf(stderr, "Error: DB file missing valid SCHEMA_MAGIC on Page 0.\n");
             table->root_page_num = 1;
             memset(&table->schema, 0, sizeof(Schema));
             table->schema.has_schema = false;
@@ -629,15 +655,28 @@ Table* table_open(const char* filename) {
 
 void table_close(Table* table) {
     tx_free_backups(table);
-    for (uint32_t i = 0; i < table->pager->num_pages; i++) {
-        if (table->pager->pages[i] == NULL) continue;
-        pager_flush(table->pager, i);
-        free(table->pager->pages[i]);
-        table->pager->pages[i] = NULL;
-    }
+	
+	// Sync the latest schema and root pointer to Page 0 before flushing to disk
+	if(table->pager->pages[0] != NULL){
+	MetaPage* meta = (MetaPage*)table->pager->pages[0];
+	meta->magic = SCHEMA_MAGIC;
+	meta->root_page_num = table->root_page_num;
+	meta->schema = table->schema;	
+}
+	
+	// Flush dirty pages (Page 0, Page 1, and any allocated child/leaf pages)
+	for(uint32_t i = 0; i < table->pager->num_pages; i++){
+	if(table->pager->pages[i] == NULL) continue;
+	pager_flush(table->pager, i);
+	free(table->pager->pages[i]);
+	table->pager->pages[i] = NULL;
+
+
+}
     pager_close(table->pager);
     free(table);
 }
+
 
 uint32_t get_node_max_key(Table* table, void* node) {
     if (get_node_type(node) == NODE_LEAF) {
@@ -753,7 +792,23 @@ void leaf_node_delete(Cursor* cursor) {
 }
 
 uint32_t get_unused_page_num(Table* table) {
-    return table->pager->num_pages;
+    // 1. Enforce that new allocations start at Page 2 or higher
+    // (Page 0 = MetaPage, Page 1 = Root node)
+    if (table->pager->num_pages < 2) {
+        table->pager->num_pages = 2;
+    }
+
+    uint32_t page_num = table->pager->num_pages;
+
+    // 2. Prevent exceeding pager capacity
+    if (page_num >= TABLE_MAX_PAGES) {
+        printf("Error: Database table is full. Max pages (%d) reached.\n", TABLE_MAX_PAGES);
+        exit(EXIT_FAILURE);
+    }
+
+    // 3. Reserve the page slot immediately
+    table->pager->num_pages++;
+    return page_num;
 }
 
 void create_new_root(Table* table, uint32_t right_child_page_num) {
@@ -789,6 +844,10 @@ void create_new_root(Table* table, uint32_t right_child_page_num) {
     *internal_node_right_child(root) = right_child_page_num;
     *node_parent(left_child) = table->root_page_num;
     *node_parent(right_child) = table->root_page_num;
+
+    // Keep Page 0 metadata in sync with current root page
+    MetaPage* meta = (MetaPage*)pager_get_page(table->pager, 0);
+    meta->root_page_num = table->root_page_num;
 }
 
 void update_internal_node_key(void* node, uint32_t old_key, uint32_t new_key) {
@@ -1699,16 +1758,34 @@ ExecuteResult execute_statement(Statement* statement, Table* table) {
         case STATEMENT_CREATE: {
             table->schema = statement->created_schema;
 
+			// Enforce that the root page is Page 1 (never Page 0)
+			if(table->root_page_num < 1){
+			table->root_page_num = 1;
+		}
+			// Write metadata to Page 0
             MetaPage* meta = (MetaPage*)pager_get_page(table->pager, 0);
+			memset(meta, 0, PAGE_SIZE);
             meta->magic = SCHEMA_MAGIC;
             meta->root_page_num = table->root_page_num;
             meta->schema = table->schema;
 
+			// Clear and initialize Page 1 as the empty root lead node
             void* root_node = pager_get_page(table->pager, table->root_page_num);
+			memset(root_node, 0, PAGE_SIZE);
             initialize_leaf_node(root_node);
             set_node_root(root_node, true);
-            printf("CREATE TABLE (%u columns configured)\n", table->schema.num_columns);
-            return EXECUTE_SUCCESS;
+
+			// Ensure pager tracks at least Page 0 and Page 1
+			if(table->pager->num_pages < 2){
+				table->pager->num_pages = 2;
+			}
+			// Persist both pages to disk immediately
+			pager_flush(table->pager, 0);
+			pager_flush(table->pager, table->root_page_num);
+
+			printf("CREATE TABLE (%u columns configured)\n", table->schema.num_columns);
+			return EXECUTE_SUCCESS;
+
         }
         case STATEMENT_BEGIN:
             return execute_begin(table);
