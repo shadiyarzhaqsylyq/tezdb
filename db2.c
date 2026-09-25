@@ -904,6 +904,129 @@ void update_ancestor_keys(Table* table, uint32_t node_page_num, uint32_t old_key
 
 
 
+void internal_node_remove_child(Table* table, uint32_t parent_page_num, uint32_t child_page_num, uint32_t old_child_max);
+
+
+/*
+ * Recursively deletes an internal node that has lost all of its children.
+ */
+void handle_empty_internal_node(Table* table, uint32_t node_page_num, uint32_t old_max) {
+    void* node = pager_get_page(table->pager, node_page_num);
+
+    // If it's the root, root collapse/reset will handle it
+    if (is_node_root(node)) {
+        return;
+    }
+
+    uint32_t parent_page_num = *node_parent(node);
+    
+    // Recursively remove this empty internal node from its parent
+    internal_node_remove_child(table, parent_page_num, node_page_num, old_max);
+}
+
+
+
+/*
+ * Removes child_page_num from parent_page_num.
+ * Handles shifting cells, promoting a new right_child,
+ * updating ancestor keys, and detecting if the parent itself became empty.
+ */
+void internal_node_remove_child(Table* table, uint32_t parent_page_num, uint32_t child_page_num, uint32_t old_child_max) {
+    void* parent = pager_get_page(table->pager, parent_page_num);
+    uint32_t num_keys = *internal_node_num_keys(parent);
+
+    if (*internal_node_right_child(parent) == child_page_num) {
+        if (num_keys > 0) {
+            // Promote child[num_keys - 1] to become right_child
+            uint32_t new_right = *internal_node_child(parent, num_keys - 1);
+            *internal_node_right_child(parent) = new_right;
+            *internal_node_num_keys(parent) = num_keys - 1;
+
+            // Parent's maximum key is now the max key of its new right_child
+            void* new_right_node = pager_get_page(table->pager, new_right);
+            uint32_t new_parent_max = get_node_max_key(table, new_right_node);
+            update_ancestor_keys(table, parent_page_num, old_child_max, new_parent_max);
+        } else {
+            // The sole child was deleted; parent has 0 children left
+            *internal_node_right_child(parent) = INVALID_PAGE_NUM;
+        }
+    } else {
+        int target_idx = -1;
+        for (uint32_t i = 0; i < num_keys; i++) {
+            if (*internal_node_child(parent, i) == child_page_num) {
+                target_idx = (int)i;
+                break;
+            }
+        }
+
+        if (target_idx >= 0) {
+            // Shift cells left to overwrite the deleted child
+            for (uint32_t i = (uint32_t)target_idx; i < num_keys - 1; i++) {
+                void* dest = internal_node_cell(parent, i);
+                void* src = internal_node_cell(parent, i + 1);
+                memcpy(dest, src, INTERNAL_NODE_CELL_SIZE);
+            }
+            *internal_node_num_keys(parent) = num_keys - 1;
+        }
+    }
+
+
+ // Check for Parent Emptiness / Underflow
+	if(*internal_node_num_keys(parent) == 0 && *internal_node_right_child(parent) == INVALID_PAGE_NUM){
+		if(!is_node_root(parent)) {
+			// Propagate deletion upward to grandparent
+			handle_empty_internal_node(table, parent_page_num, old_child_max);
+	
+		}
+
+	}
+
+
+
+}
+
+
+/*
+ * Checks if the current root node needs to collapse or be reset.
+ */
+void check_and_collapse_root(Table* table) {
+    void* root = pager_get_page(table->pager, table->root_page_num);
+
+    // Only internal root nodes can collapse
+    if (get_node_type(root) != NODE_INTERNAL) {
+        return;
+    }
+
+    uint32_t num_keys = *internal_node_num_keys(root);
+    uint32_t right_child = *internal_node_right_child(root);
+
+    if (num_keys == 0) {
+        if (right_child != INVALID_PAGE_NUM) {
+            // Case 1: Exactly 1 child remains -> Collapse root (shrink tree height)
+            void* new_root_node = pager_get_page(table->pager, right_child);
+            set_node_root(new_root_node, true);
+            *node_parent(new_root_node) = 0;
+            table->root_page_num = right_child;
+
+            // Update Page 0 metadata
+            MetaPage* meta = (MetaPage*)pager_get_page(table->pager, 0);
+            meta->root_page_num = right_child;
+
+            // Recurse in case the new root also only has 1 child
+            check_and_collapse_root(table);
+        } else {
+            // Case 2: 0 children remain -> Entire database table is empty
+            // Reset this root node to a clean leaf root
+            initialize_leaf_node(root);
+            set_node_root(root, true);
+        }
+    }
+}
+
+
+
+
+
 /*
  * Handles removing an emptied leaf page from the B+Tree and collapsing
  * the root if the tree height shrinks.
@@ -916,8 +1039,14 @@ void handle_empty_leaf_node(Table* table, uint32_t leaf_page_num, uint32_t old_m
 
     // 1. Unlink from sibling leaf list
     unlink_leaf_sibling(table, leaf_page_num);
-
+	
+	// 2. Remove the leaf from its parent internal node (propagates upward if needed)
     uint32_t parent_page_num = *node_parent(leaf);
+	internal_node_remove_child(table, parent_page_num, leaf_page_num, old_max);	
+
+	// 3. Check If the root need to collapse or reset
+	check_and_collapse_root(table);
+	
     void* parent = pager_get_page(table->pager, parent_page_num);
     uint32_t num_keys = *internal_node_num_keys(parent);
 
@@ -932,7 +1061,11 @@ void handle_empty_leaf_node(Table* table, uint32_t leaf_page_num, uint32_t old_m
             // Parent's maximum key is now the max key of its new right_child
             uint32_t new_parent_max = get_node_max_key(table, pager_get_page(table->pager, new_right));
             update_ancestor_keys(table, parent_page_num, old_max, new_parent_max);
-        }
+        } else {
+			// No remaining children in this internal node
+			*internal_node_right_child(parent) = INVALID_PAGE_NUM;
+	
+		}
     } else {
         int target_idx = -1;
         for (uint32_t i = 0; i < num_keys; i++) {
