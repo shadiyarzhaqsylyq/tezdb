@@ -1,4 +1,4 @@
-package main
+package db
 
 import "core:fmt"
 import "core:strconv"
