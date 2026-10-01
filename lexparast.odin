@@ -1,10 +1,8 @@
-package db
+package main
 
 import "core:fmt"
-import "core:os"
 import "core:strconv"
 import "core:strings"
-import "core:unicode/utf8"
 
 /* ========================================================================= *
  * 1. LEXER (TOKENIZER)
@@ -129,7 +127,7 @@ lexer_next_token :: proc(lexer: ^Lexer) -> Token {
 }
 
 /* ========================================================================= *
- * 2. ABSTRACT SYNTAX TREE (AST) DEFINITIONS
+ * 2. ABSTRACT SYNTAX TREE (CONTIGUOUS AST)
  * ========================================================================= */
 
 DataType :: enum {
@@ -137,18 +135,17 @@ DataType :: enum {
 	VARCHAR,
 }
 
+// Stored contiguously inside [dynamic]ColumnDef (no next pointers, no heap overhead)
 ColumnDef :: struct {
-	name:           string,
+	name:           string,    // Borrowed sub-slice of input query (zero-copy)
 	type:           DataType,
-	varchar_length: int, // Optional length (e.g. 255 if unspecified)
+	varchar_length: int,
 	is_primary_key: bool,
-	next:           ^ColumnDef,
 }
 
 CreateTableStmt :: struct {
-	table_name:   string,
-	columns:      ^ColumnDef,
-	column_count: int,
+	table_name: string,             // Borrowed sub-slice of input query
+	columns:    [dynamic]ColumnDef, // Contiguous buffer in memory
 }
 
 /* ========================================================================= *
@@ -193,7 +190,7 @@ parse_identifier :: proc(parser: ^Parser) -> (string, bool) {
 	if parser.current.type == .IDENTIFIER ||
 	   parser.current.type == .TABLE      ||
 	   parser.current.type == .KEY {
-		id := strings.clone(parser.current.text)
+		id := parser.current.text // Slices the source directly (no malloc/clone)
 		parser_advance(parser)
 		return id, true
 	}
@@ -201,9 +198,9 @@ parse_identifier :: proc(parser: ^Parser) -> (string, bool) {
 	return "", false
 }
 
-parse_column_def :: proc(parser: ^Parser) -> ^ColumnDef {
-	col_name, ok := parse_identifier(parser)
-	if !ok do return nil
+parse_column_def :: proc(parser: ^Parser) -> (col: ColumnDef, ok: bool) {
+	col_name, name_ok := parse_identifier(parser)
+	if !name_ok do return {}, false
 
 	type: DataType
 	varchar_len := 255 // Default length
@@ -215,73 +212,59 @@ parse_column_def :: proc(parser: ^Parser) -> ^ColumnDef {
 		if parser_match(parser, .LPAREN) {
 			if parser.current.type == .NUMBER {
 				val, parse_ok := strconv.parse_int(parser.current.text)
-				if parse_ok {
-					varchar_len = val
-				}
+				if parse_ok do varchar_len = val
 				parser_advance(parser)
 			} else {
 				fmt.eprintf("Syntax Error: Expected number inside VARCHAR(...)\n")
-				delete(col_name)
-				return nil
+				return {}, false
 			}
 			if !parser_expect(parser, .RPAREN, "Expected ')' after VARCHAR length") {
-				delete(col_name)
-				return nil
+				return {}, false
 			}
 		}
 	} else {
 		fmt.eprintf("Syntax Error: Expected data type for column '%s'\n", col_name)
-		delete(col_name)
-		return nil
+		return {}, false
 	}
 
 	is_primary_key := false
 	if parser_match(parser, .PRIMARY) {
 		if !parser_expect(parser, .KEY, "Expected 'KEY' after 'PRIMARY'") {
-			delete(col_name)
-			return nil
+			return {}, false
 		}
 		is_primary_key = true
 	}
 
-	col := new(ColumnDef)
-	col.name = col_name
-	col.type = type
-	col.varchar_length = varchar_len
-	col.is_primary_key = is_primary_key
-	col.next = nil
-
-	return col
+	return ColumnDef{
+		name           = col_name,
+		type           = type,
+		varchar_length = varchar_len,
+		is_primary_key = is_primary_key,
+	}, true
 }
 
-parse_create_table :: proc(parser: ^Parser) -> ^CreateTableStmt {
-	if !parser_expect(parser, .CREATE, "Expected 'CREATE'") do return nil
-	if !parser_expect(parser, .TABLE, "Expected 'TABLE'")   do return nil
+parse_create_table :: proc(parser: ^Parser) -> (stmt: CreateTableStmt, ok: bool) {
+	if !parser_expect(parser, .CREATE, "Expected 'CREATE'") do return {}, false
+	if !parser_expect(parser, .TABLE, "Expected 'TABLE'")   do return {}, false
 
-	table_name, ok := parse_identifier(parser)
-	if !ok do return nil
+	table_name, name_ok := parse_identifier(parser)
+	if !name_ok do return {}, false
 
 	if !parser_expect(parser, .LPAREN, "Expected '(' after table name") {
-		delete(table_name)
-		return nil
+		return {}, false
 	}
 
-	stmt := new(CreateTableStmt)
 	stmt.table_name = table_name
-	stmt.columns = nil
-	stmt.column_count = 0
-
-	tail: ^^ColumnDef = &stmt.columns
+	stmt.columns = make([dynamic]ColumnDef)
 
 	for parser.current.type != .RPAREN && parser.current.type != .EOF {
-		col := parse_column_def(parser)
-		if col == nil {
-			return nil
+		col, col_ok := parse_column_def(parser)
+		if !col_ok {
+			delete(stmt.columns)
+			return {}, false
 		}
 
-		tail^ = col
-		tail = &col.next
-		stmt.column_count += 1
+		append(&stmt.columns, col)
 
 		if !parser_match(parser, .COMMA) {
 			break
@@ -289,52 +272,37 @@ parse_create_table :: proc(parser: ^Parser) -> ^CreateTableStmt {
 	}
 
 	if !parser_expect(parser, .RPAREN, "Expected ')' after column list") {
-		return nil
+		delete(stmt.columns)
+		return {}, false
 	}
 
-	// Semicolon is optional
 	parser_match(parser, .SEMICOLON)
-
-	return stmt
+	return stmt, true
 }
 
 /* ========================================================================= *
  * 4. CLEANUP & DEBUG PRINTING
  * ========================================================================= */
 
+// Strings borrow from the original query, so freeing the dynamic array is all that is needed.
 free_create_table_stmt :: proc(stmt: ^CreateTableStmt) {
-	if stmt == nil do return
-	delete(stmt.table_name)
-
-	curr := stmt.columns
-	for curr != nil {
-		next := curr.next
-		delete(curr.name)
-		free(curr)
-		curr = next
-	}
-	free(stmt)
+	delete(stmt.columns)
 }
 
 print_ast :: proc(stmt: ^CreateTableStmt) {
-	if stmt == nil do return
 	fmt.println("CreateTableStmt:")
 	fmt.printf("  Table Name: %s\n", stmt.table_name)
-	fmt.printf("  Columns (%d):\n", stmt.column_count)
+	fmt.printf("  Columns (%d):\n", len(stmt.columns))
 
-	curr := stmt.columns
-	idx := 1
-	for curr != nil {
-		type_str := curr.type == .INT ? "INT" : "VARCHAR"
-		pk_str := curr.is_primary_key ? "YES" : "NO"
+	for col, idx in stmt.columns {
+		type_str := col.type == .INT ? "INT" : "VARCHAR"
+		pk_str := col.is_primary_key ? "YES" : "NO"
 		fmt.printf("    [%d] Name: %-8s | Type: %-7s | PrimaryKey: %s\n",
-			idx,
-			curr.name,
+			idx + 1,
+			col.name,
 			type_str,
 			pk_str,
 		)
-		idx += 1
-		curr = curr.next
 	}
 }
 
@@ -343,7 +311,7 @@ print_ast :: proc(stmt: ^CreateTableStmt) {
  * ========================================================================= */
 
 main :: proc() {
-	query := "CREATE TABLE table (id INT PRIMARY KEY, name VARCHAR, did VARCHAR, " +
+	query := "CREATE TABLE table (id INT PRIMARY KEY, name VARCHAR(100), did VARCHAR, " +
 		"dep VARCHAR, salary INT, city VARCHAR);"
 
 	fmt.printf("Input Query:\n%s\n\n", query)
@@ -354,12 +322,12 @@ main :: proc() {
 	parser: Parser
 	parser_init(&parser, &lexer)
 
-	stmt := parse_create_table(&parser)
+	stmt, ok := parse_create_table(&parser)
 
-	if stmt != nil {
+	if ok {
 		fmt.println("AST successfully constructed:")
-		print_ast(stmt)
-		free_create_table_stmt(stmt)
+		print_ast(&stmt)
+		free_create_table_stmt(&stmt)
 	} else {
 		fmt.println("Failed to parse query.")
 	}
