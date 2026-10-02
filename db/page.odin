@@ -55,9 +55,6 @@ Page :: struct #align(64) {
     data: [PAGE_SIZE]u8,
 }
 
-page_get_header :: proc(page: ^Page) -> ^Page_Header {
-    return cast(^Page_Header)&page.data[0]
-}
 
 RecordHeader :: bit_field u16 {
     len:   u16 | 14, // Bits 0..13 (Row length up to 16,384 bytes = 16 KB)
