@@ -44,6 +44,8 @@ PAGE_SIZE :: 16384 // 16 KB page (standard for InnoDB-like engines)
 Page_Header :: struct #packed {
     page_lsn:     u64,  // Log Sequence Number for write-ahead logging (WAL)
     page_id:      u32,
+    next_page:    u32,
+    prev_page:    u32,
     item_count:   u16,
     free_top:     u16,  // Grows downward (offset from start of page)
     free_bottom:  u16,  // Grows upward (offset from start of page)
