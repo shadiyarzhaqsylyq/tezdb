@@ -50,7 +50,7 @@ Page_Header :: struct #packed {
     free_top:     u16,  // 2 bytes
     free_bottom:  u16,  // 2 bytes
     flags:        u16,  // 2 bytes
-    reserved:     u32,  // 4 bytes <-- Added to pad exactly to 32 bytes
+    reserved:     u32,  // 4 bytes <-- Added to pad exactly to 32 bytes, automatically zero-initialized to 0 by default
 }
 
 
