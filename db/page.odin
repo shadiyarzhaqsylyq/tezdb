@@ -28,7 +28,7 @@ Offsets Array: [Slot 0 | Slot 1 | Slot 2 | Slot 3 | Slot 4]
 Payload Area:
 ... [Raw Row 1 bytes] [Raw Row 2 bytes]
 
-SlotPointer :: bit_field u32 {
+Slot :: bit_field u32 {
     lp_off:   u16 | 15, // Offset inside page (0..32,767)
     lp_flags: u8  | 2,  // 0: Unused, 1: Normal, 2: Deleted, 3: Overflow
     lp_len:   u16 | 15, // Exact payload length (0..32,767)
