@@ -39,7 +39,7 @@ package db
 import "core:mem"
 import "core:slice"
 
-PAGE_SIZE :: 16384 // 16 KB page (standard for InnoDB-like engines)
+PAGE_SIZE :: 16384 // 16 KB page
 
 Page_Header :: struct #packed {
     page_lsn:     u64,  // 8 bytes
