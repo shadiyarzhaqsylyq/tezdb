@@ -59,31 +59,11 @@ page_get_header :: proc(page: ^Page) -> ^Page_Header {
     return cast(^Page_Header)&page.data[0]
 }
 
-// Get the contiguous keys array for fast SIMD/binary search
-page_get_keys :: proc(page: ^Page, $Key_Type: typeid) -> []Key_Type {
-    header := page_get_header(page)
-    offset := size_of(Page_Header)
-    ptr := cast(^Key_Type)&page.data[offset]
-    return slice.from_ptr(ptr, int(header.item_count))
+RecordHeader :: bit_field u16 {
+    len:   u16 | 14, // Bits 0..13 (Row length up to 16,384 bytes = 16 KB)
+    flags: u8  | 2,  // Bits 14..15 (0 = Normal, 1 = Deleted, 2 = Overflow)
 }
 
-// Get the offsets array
-page_get_offsets :: proc(page: ^Page, $Key_Type: typeid) -> []u16 {
-    header := page_get_header(page)
-    offset := size_of(Page_Header) + (int(header.item_count) * size_of(Key_Type))
-    ptr := cast(^u16)&page.data[offset]
-    return slice.from_ptr(ptr, int(header.item_count))
-}
-
-// Binary search is extremely fast because it's scanning contiguous memory
-page_find_key :: proc(page: ^Page, key: i64) -> (payload_offset: u16, found: bool) {
-    keys := page_get_keys(page, i64)
-    idx, ok := slice.binary_search(keys, key)
-    if !ok do return 0, false
-
-    offsets := page_get_offsets(page, i64)
-    return offsets[idx], true
-}
 
 
 
