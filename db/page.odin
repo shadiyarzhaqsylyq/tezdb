@@ -1,5 +1,13 @@
-package storage
+/* Record Header at Payload
+Header
+Keys Array: [key 0 | key 1 | key 2 | key 3 | key 4]
+Offsets Array: [offset 0 | offset 1 | offset 2 | offset 3 | offset 4]
 
+Payload Area:
+... [RecordHeader | Row 1 bytes] [RecordHeader | Row 2 bytes]
+*/
+
+package db
 import "core:mem"
 import "core:slice"
 
@@ -48,4 +56,18 @@ page_find_key :: proc(page: ^Page, key: i64) -> (payload_offset: u16, found: boo
     offsets := page_get_offsets(page, i64)
     return offsets[idx], true
 }
+
+
+// Exactly 2 bytes prepended to every record payload
+RecordHeader :: bit_field u16 {
+    len:   u16 | 14, // Bits 0..13 (Row length up to 16,384 bytes = 16 KB)
+    flags: u8  | 2,  // Bits 14..15 (0 = Normal, 1 = Deleted, 2 = Overflow)
+}
+
+RecordFlag :: enum u8 {
+    Normal   = 0,
+    Deleted  = 1, // Tombstone (marked deleted without shifting data)
+    Overflow = 2, // Row is large and spills to an overflow page
+}
+
 
