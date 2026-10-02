@@ -42,15 +42,17 @@ import "core:slice"
 PAGE_SIZE :: 16384 // 16 KB page (standard for InnoDB-like engines)
 
 Page_Header :: struct #packed {
-    page_lsn:     u64,  // Log Sequence Number for write-ahead logging (WAL)
-    page_id:      u32,
-    next_page:    u32,
-    prev_page:    u32,
-    item_count:   u16,
-    free_top:     u16,  // Grows downward (offset from start of page)
-    free_bottom:  u16,  // Grows upward (offset from start of page)
-    flags:        u16,
+    page_lsn:     u64,  // 8 bytes
+    page_id:      u32,  // 4 bytes
+    next_page:    u32,  // 4 bytes
+    prev_page:    u32,  // 4 bytes
+    item_count:   u16,  // 2 bytes
+    free_top:     u16,  // 2 bytes
+    free_bottom:  u16,  // 2 bytes
+    flags:        u16,  // 2 bytes
+    reserved:     u32,  // 4 bytes <-- Added to pad exactly to 32 bytes
 }
+
 
 // We treat the raw page as a fixed-size byte buffer
 Page :: struct #align(64) {
