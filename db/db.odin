@@ -1,36 +1,42 @@
 package db
 
+import "core:bufio"
 import "core:fmt"
 import "core:os"
-import "core:bufio"
 import "core:strings"
 
-main :: proc () {
-    if len(os.args) < 2 {
-		fmt.println("Must supply a database filename.")
+main :: proc() {
+	if len(os.args) < 2 {
+		fmt.println("Usage: db <database_file>")
 		os.exit(1)
 	}
 
-	filename := os.args[1]
-	db := db_open(filename)
+	db_filename := os.args[1]
+	fmt.printf("Opened database: %s\n", db_filename)
 
+	reader: bufio.Reader
+	in_stream := os.to_stream(os.stdin)
+	bufio.reader_init(&reader, in_stream)
+	defer bufio.reader_destroy(&reader)
 
-    reader: bufio.Reader
-    
-    in_stream := os.to_stream(os.stdin)
-    bufio.reader_init(&reader, in_stream)
-    for {
-        fmt.print("db> ")
-        err := os.flush(os.stdin)
-        line, _ := bufio.reader_read_string(&reader, '\n')
+	for {
+		fmt.print("db> ")
+		os.flush(os.stdout) // Guarantees prompt displays immediately
 
-		input_buffer := strings.trim_right(line, "\r\n")
-        if strings.compare("exit", strings.trim_space(line)) == 0 {
-            break
-        } else {
-            fmt.println("command: ", line)
-			fmt.println("inputbuf: ", input_buffer)
-			
-        }
-    }
+		line, err := bufio.reader_read_string(&reader, '\n')
+		if err != nil do break
+		defer delete(line) // Frees the allocated line memory each loop iteration
+
+		command := strings.trim_space(line)
+
+		if command == "exit" || command == ".exit" {
+			fmt.println("Bye!")
+			break
+		}
+
+		if len(command) == 0 do continue
+
+		// Pass 'command' to your SQL parser / executor here
+		fmt.println("Unrecognized command:", command)
+	}
 }
