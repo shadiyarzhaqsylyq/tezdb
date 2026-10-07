@@ -58,7 +58,7 @@ Page_Header :: struct #packed {
     
     // 8 bytes combined (Offsets 24..31)
     flags:            u32, // 4 bytes (Offset 24: 32 feature flags)
-    reserved:         u32, // 4 bytes (Offset 28: Reserved for future use)
+    reserved:         u32, // 4 bytes (Offset 28: Reserved for future use) // or reserved: [4]u8
 }
 // Exact Total: 32 bytes!
 
