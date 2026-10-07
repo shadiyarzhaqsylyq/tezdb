@@ -27,22 +27,22 @@ import "core:slice"
 PAGE_SIZE :: 16384 // 16 KB page
 
 Page_Header :: struct #packed {
-    page_lsn:     u64,  // 8 bytes
-    page_id:      u32,  // 4 bytes
-    next_page:    u32,  // 4 bytes
-    prev_page:    u32,  // 4 bytes
-    item_count:   u16,  // 2 bytes
-    free_top:     u16,  // 2 bytes
-    free_bottom:  u16,  // 2 bytes
-    flags:        u16,  // 2 bytes
-    reserved:     u32,  // 4 bytes <-- Added to pad exactly to 32 bytes, automatically zero-initialized to 0 by default
+    lsn:              u64, // 8 bytes (Offset 0)
+    page_id:          u32, // 4 bytes (Offset 8)
+    checksum:         u32, // 4 bytes (Offset 12)
+    lower:            u16, // 2 bytes (Offset 16)
+    upper:            u16, // 2 bytes (Offset 18)
+    slot_count:       u16, // 2 bytes (Offset 20)
+    fragmented_space: u16, // 2 bytes (Offset 22)
+    
+    // 8 bytes combined (Offsets 24..31)
+    flags:            u32, // 4 bytes (Offset 24: 32 feature flags)
+    reserved:         u32, // 4 bytes (Offset 28: Reserved for future use)
 }
+// Exact Total: 32 bytes!
 
-Slot :: bit_field u32 {
-    lp_off:   u16 | 15, // Offset inside page (0..32,767)
-    lp_flags: u8  | 2,  // 0: Unused, 1: Normal, 2: Deleted, 3: Overflow
-    lp_len:   u16 | 15, // Exact payload length (0..32,767)
-}
+
+
 
 /* 8byte alternative
 Slot :: struct #packed {
@@ -60,6 +60,10 @@ Page :: struct #align(64) {
     data: [PAGE_SIZE]u8,
 }
 
+Page :: struct #packed {
+    header: Page_Header,
+    data:   [PAGE_SIZE - size_of(Page_Header)]u8,
+}
 
 
 
