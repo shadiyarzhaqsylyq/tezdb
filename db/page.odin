@@ -47,20 +47,30 @@ import "core:slice"
 
 PAGE_SIZE :: 16384 // 16 KB page
 
+
+// Alternative
 Page_Header :: struct #packed {
-    lsn:              u64, // 8 bytes (Offset 0)
-    page_id:          u32, // 4 bytes (Offset 8)
-    checksum:         u32, // 4 bytes (Offset 12)
-    lower:            u16, // 2 bytes (Offset 16)
-    upper:            u16, // 2 bytes (Offset 18)
-    slot_count:       u16, // 2 bytes (Offset 20)
-    fragmented_space: u16, // 2 bytes (Offset 22)
-    
-    // 8 bytes combined (Offsets 24..31)
-    flags:            u32, // 4 bytes (Offset 24: 32 feature flags)
-    reserved:         u32, // 4 bytes (Offset 28: Reserved for future use) // or reserved: [4]u8
-}
-// Exact Total: 32 bytes!
+    // 1. 8-Byte Fields (Offsets 0 .. 7)
+    lsn:              u64,
+
+    // 2. 4-Byte Fields (Offsets 8 .. 15)
+    page_id:          u32,
+    checksum:         u32,
+
+    // 3. 2-Byte Fields (Offsets 16 .. 23)
+    lower:            u16,
+    upper:            u16,
+    slot_count:       u16,
+    fragmented_space: u16,
+
+    // 4. 1-Byte Fields (Offsets 24 .. 25)
+    page_type:        u8,
+    flags:            u8,
+
+    // 5. Explicit Reserved Padding to reach exactly 32 bytes (Offsets 26 .. 31)
+    reserved:         [6]u8, // Must be initialized to 0!
+} // 32 byte
+
 
 
 
