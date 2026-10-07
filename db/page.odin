@@ -44,6 +44,16 @@ Slot :: bit_field u32 {
     lp_len:   u16 | 15, // Exact payload length (0..32,767)
 }
 
+/* 8byte alternative
+Slot :: struct #packed {
+    prefix: u32,       // First 4 bytes of the key (Big-Endian)
+    length: u16,       // Length of the row payload (up to 64 KB)
+    using info: bit_field u16 {
+        offset: u16 | 14, // Byte offset to payload (up to 16,384 bytes)
+        flag:   u8  | 2,  // 00=Dead, 01=Live, 10=Redirected
+    },
+}
+*/
 
 // We treat the raw page as a fixed-size byte buffer
 Page :: struct #align(64) {
