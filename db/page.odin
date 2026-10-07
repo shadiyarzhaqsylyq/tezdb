@@ -61,11 +61,6 @@ Page :: struct #align(64) {
 }
 
 
-RecordHeader :: bit_field u16 {
-    len:   u16 | 14, // Bits 0..13 (Row length up to 16,384 bytes = 16 KB)
-    flags: u8  | 2,  // Bits 14..15 (0 = Normal, 1 = Deleted, 2 = Overflow)
-}
-
 
 
 
