@@ -18,6 +18,27 @@ Offsets Array: [Slot 0 | Slot 1 | Slot 2 | Slot 3 | Slot 4]
 Payload Area:
 ... [Raw Row 1 bytes] [Raw Row 2 bytes]
 
+
+
+Current
+Header
+[Slot 0][Slot 1][Slot 2] goes downward
+
+Free Space
+Size = upper - lower
+
+goes upward
+Row 2 [ Header + Key + Value]
+Row 1 [ Header + Key + Value]
+Row 0 [ Header + Key + Value]
+
+Row Header
+we have 5 columns
+Bitmap 0 1 0 1 0
+1st columns is null
+2nd columns is not null
+
+
 */
 
 package db
