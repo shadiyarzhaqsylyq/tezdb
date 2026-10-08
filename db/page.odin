@@ -48,18 +48,23 @@ import "core:slice"
 PAGE_SIZE :: 8192 // 8 KB page
 
 
-// Alternative
+
 Page_Header :: struct #packed {
 
 }
 
 
-Slot :: struct #packed {
-    offset: u16, // Byte offset to payload (up to 16,384 bytes)
-    length: u16,
-    flag:   u16,  // 00=Dead, 01=Live, 10=Redirected
-
+// Exactly 32 bits (4 bytes)
+Slot :: bit_field u32 {
+    offset:   u16  | 16, // 16 bits: Supports page sizes up to 64 KB (0..65535)
+    length:   u16  | 13, // 13 bits: Max inline row length is 8191 bytes
+    deleted:  bool |  1, // Tombstone marker
+    overflow: bool |  1, // Set if row has off-page BLOB/overflow columns
+    redirect: bool |  1, // Set if row is forwarded
 }
+
+#assert(size_of(Slot) == 4, "Slot must be exactly 4 bytes")
+
 /* Alternative
 Slot_Meta :: bit_field u32 {
     offset:   u16  | 16,
