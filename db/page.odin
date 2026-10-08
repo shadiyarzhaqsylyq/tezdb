@@ -45,7 +45,7 @@ package db
 import "core:mem"
 import "core:slice"
 
-PAGE_SIZE :: 16384 // 16 KB page
+PAGE_SIZE :: 8192 // 8 KB page
 
 
 // Alternative
