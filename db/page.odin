@@ -40,11 +40,6 @@ Slot :: struct #packed {
 */
 
 
-// We treat the raw page as a fixed-size byte buffer
-Page :: struct #align(64) {
-    data: [PAGE_SIZE]u8,
-}
-
 Page :: struct #packed {
     header: Page_Header,
     data:   [PAGE_SIZE - size_of(Page_Header)]u8,
